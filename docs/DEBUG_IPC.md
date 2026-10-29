@@ -1,22 +1,22 @@
 # 调试 IPC（仅 debug 构建）
 
-为了避免调试时移动用户鼠标，FPilot 增加了一个**仅 debug 构建启用、默认关闭**的本地命令通道。Release 构建不会编译此模块，也不会监听端口。
+为了避免调试时移动用户鼠标，YKExplorer 增加了一个**仅 debug 构建启用、默认关闭**的本地命令通道。Release 构建不会编译此模块，也不会监听端口。
 
 ## 启动
 
 ```powershell
 # 方式一：显式命令行参数
-cargo run -- --debug-port=47654 "D:\Project\FpilotRec\fpilot\demo"
+cargo run -- --debug-port=47654 "D:\Project\YKExplorer\demo"
 
 # 方式二：环境变量
-$env:FPILOT_DEBUG_PORT = '47654'
-cargo run -- "D:\Project\FpilotRec\fpilot\demo"
+$env:YKEXPLORER_DEBUG_PORT = '47654'
+cargo run -- "D:\Project\YKExplorer\demo"
 ```
 
 也可以直接启动：
 
 ```powershell
-target\debug\fpilot.exe --debug-port=47654 "D:\Project\FpilotRec\fpilot\demo"
+target\debug\YKExplorer.exe --debug-port=47654 "D:\Project\YKExplorer\demo"
 ```
 
 通道只绑定 `127.0.0.1`。debug 构建的 stderr 会记录 `debug IPC listening on 127.0.0.1:47654`。
@@ -27,8 +27,8 @@ target\debug\fpilot.exe --debug-port=47654 "D:\Project\FpilotRec\fpilot\demo"
 
 ```powershell
 . .\tools\debug_ipc.ps1
-Invoke-FpilotDebug 'state'
-Invoke-FpilotDebug 'ping'
+Invoke-YKExplorerDebug 'state'
+Invoke-YKExplorerDebug 'ping'
 ```
 
 协议非常简单：TCP 一行命令，一行响应。
@@ -74,7 +74,7 @@ Invoke-FpilotDebug 'ping'
 `copy-test` 示例：
 
 ```powershell
-Invoke-FpilotDebug 'copy-test D:\Project\FpilotRec\fpilot\demo\中文说明.txt|F:\'
+Invoke-YKExplorerDebug 'copy-test D:\Project\YKExplorer\demo\中文说明.txt|F:\'
 ```
 
 输出会包含执行结果、目标路径、成功项和错误项。
@@ -85,8 +85,8 @@ Invoke-FpilotDebug 'copy-test D:\Project\FpilotRec\fpilot\demo\中文说明.txt|
 
 ```powershell
 . .\tools\capture_hwnd.ps1
-$p = Get-Process | Where-Object { $_.Path -eq 'D:\Project\FpilotRec\fpilot\target\debug\fpilot.exe' } | Select-Object -First 1
-Save-WindowPng -Handle $p.MainWindowHandle -Path 'D:\temp\fpilot.png'
+$p = Get-Process | Where-Object { $_.Path -eq 'D:\Project\YKExplorer\target\debug\YKExplorer.exe' } | Select-Object -First 1
+Save-WindowPng -Handle $p.MainWindowHandle -Path 'D:\temp\ykexplorer.png'
 ```
 
 `Save-WindowPng` 使用 `PrintWindow(..., PW_RENDERFULLCONTENT)`，不会移动光标。
@@ -94,6 +94,6 @@ Save-WindowPng -Handle $p.MainWindowHandle -Path 'D:\temp\fpilot.png'
 ## 安全说明
 
 - 仅在 `#[cfg(debug_assertions)]` 下编译；
-- 只在显式传入 `--debug-port` 或设置 `FPILOT_DEBUG_PORT` 时启用；
+- 只在显式传入 `--debug-port` 或设置 `YKEXPLORER_DEBUG_PORT` 时启用；
 - 仅绑定 loopback，无认证，仅用于本机开发；
 - 可用于检查状态、模拟文件和设置操作，但**不会**模拟物理拖放/点击，以免干扰用户。

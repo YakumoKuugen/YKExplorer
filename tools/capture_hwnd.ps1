@@ -5,7 +5,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Drawing;
 using System.Drawing.Imaging;
-public class FpilotCapture {
+public class YkExplorerCapture {
  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
@@ -27,5 +27,5 @@ public class FpilotCapture {
 '@ -ReferencedAssemblies System.Drawing
 function Save-WindowPng {
     param([Parameter(Mandatory = $true)][IntPtr]$Handle, [Parameter(Mandatory = $true)][string]$Path)
-    [FpilotCapture]::Save($Handle, $Path)
+    [YkExplorerCapture]::Save($Handle, $Path)
 }

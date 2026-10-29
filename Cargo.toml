@@ -1,12 +1,12 @@
 [package]
-name = "fpilot"
+name = "YKExplorer"
 version = "0.1.0"
 edition = "2024"
 description = "A modern Windows file manager built with GPUI and Rust"
 license = "MIT"
 
 [[bin]]
-name = "fpilot"
+name = "YKExplorer"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -66,7 +66,7 @@ opt-level = 2
 strip = true
 lto = "thin"
 
-[profile.dev.package.fpilot]
+[profile.dev.package.YKExplorer]
 debug = 1
 
 

@@ -24,7 +24,7 @@ use gpui::{
 use app::{
     Back, Cancel, CloseTab, CopyFiles, CopyPath, CutFiles, FILE_MANAGER_CONTEXT, FocusPath,
     FocusSearch, Forward, NewFile, NewFolder, NewTab, NextTab, OpenSelected, OpenSelectedNewTab,
-    PasteFiles, PermanentDelete, PilotApp, PrevTab, Refresh, RenameSelection, RevealSelection,
+    PasteFiles, PermanentDelete, ExplorerApp, PrevTab, Refresh, RenameSelection, RevealSelection,
     SelectAll, SelectExtendFirst, SelectExtendLast, SelectExtendNext, SelectExtendPrev,
     SelectFirst, SelectLast, SelectNext, SelectPrev, ToggleHidden, ToggleSidebar, TrashSelection,
     Undo, Up, ViewDetails, ViewGrid, ViewSplit,
@@ -37,7 +37,7 @@ use text_input::{
 
 fn write_crash_log(message: &str) {
     let entry = format!(
-        "\n==== FPilot crash {} ====\n{message}\n",
+        "\n==== YKExplorer crash {} ====\n{message}\n",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
     );
     for path in crash_log_paths() {
@@ -60,11 +60,11 @@ fn write_crash_log(message: &str) {
 fn crash_log_paths() -> Vec<std::path::PathBuf> {
     let mut paths = Vec::new();
     if let Some(local) = dirs::data_local_dir() {
-        paths.push(local.join("FPilot").join("crash.log"));
+        paths.push(local.join("YKExplorer").join("crash.log"));
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            paths.push(parent.join("fpilot-crash.log"));
+            paths.push(parent.join("ykexplorer-crash.log"));
         }
     }
     paths
@@ -186,7 +186,7 @@ fn main() {
             };
 
             cx.open_window(options, |window, cx| {
-                window.set_window_title("FPilot");
+                window.set_window_title("YKExplorer");
                 {
                     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
                     if let Ok(handle) = <gpui::Window as HasWindowHandle>::window_handle(window) {
@@ -197,7 +197,7 @@ fn main() {
                         }
                     }
                 }
-                let app = cx.new(|cx| PilotApp::new(cx));
+                let app = cx.new(|cx| ExplorerApp::new(cx));
                 if let Some(path) = explorer::launch_path() {
                     app.update(cx, |app, cx| app.open_start_path(path, cx));
                 }
@@ -215,7 +215,7 @@ fn main() {
 
 #[cfg(debug_assertions)]
 fn debug_port() -> Option<u16> {
-    std::env::var("FPILOT_DEBUG_PORT")
+    std::env::var("YKEXPLORER_DEBUG_PORT")
         .ok()
         .and_then(|port| port.parse::<u16>().ok())
         .or_else(|| {

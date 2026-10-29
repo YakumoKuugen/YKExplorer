@@ -1,4 +1,4 @@
-# FPilot 验证记录
+# YKExplorer 验证记录
 
 日期：2026-10-28  
 环境：Windows 10/11 x64、NVIDIA RTX 2060、Rust 1.94.0、GPUI 0.2.2、MSVC 14.44 / Windows SDK 10.0.26100
@@ -13,8 +13,8 @@
 
 ```text
 cargo build --release   => Finished (release)
-target/release/fpilot.exe
-dist/FPilot.exe
+target/release/YKExplorer.exe
+dist/YKExplorer.exe
 ```
 
 本机 MSVC 的 `/Z7` 调试记录问题已通过 `[profile.dev] debug = 0` 规避。
@@ -54,8 +54,8 @@ running 20 tests
 | 点击导航不受影响 | ✅ 抓取后原位轻点仍会跳转（实测点击侧栏项后 `state.path` 变为 `C:\`） |
 | 松开丢失兜底 | ✅ 若指针移出窗口后拿不到 mouse-up，下一次移动事件发现按键已抬起即就地结算 |
 | 快速访问增删 | ✅ `places add <path>` → 追加「子目录」；`places remove <path>` → 回到 7 项；`places toggle <Desktop>` → 移除/加回；`reset` 恢复默认顺序 |
-| 程序图标 | ✅ `build.rs` 生成 7 个尺寸的 `fpilot.ico` 并嵌入，`.rsrc` 从 864B 增至 ~21KB；`ExtractAssociatedIcon` 取出的 32px 图标与设计一致（`docs/icon-256.png`） |
-| 独立配置文件 | ✅ 旧 `settings.json` 自动迁移为 `%APPDATA%\FPilot\config.json`（字体、隐藏项等保持不变），旧文件归档；配置目录只剩 `config.json` |
+| 程序图标 | ✅ `build.rs` 生成 7 个尺寸的 `ykexplorer.ico` 并嵌入，`.rsrc` 从 864B 增至 ~21KB；`ExtractAssociatedIcon` 取出的 32px 图标与设计一致（`docs/icon-256.png`） |
+| 独立配置文件 | ✅ 旧 `settings.json` 自动迁移为 `%APPDATA%\YKExplorer\config.json`（字体、隐藏项等保持不变），旧文件归档；配置目录只剩 `config.json` |
 | 快速访问持久化 | ✅ `settings.json` 写入 `quick_places`（本机桌面在 `F:\UserFile\Desktop`，按真实路径去重） |
 | 快速访问设置页 | ✅ 设置新增「快速访问」页签，两列开关列出 7 个默认项 + 恢复默认（截图 `docs/screenshot-quick-settings.png`） |
 | 悬停浮起动画 | ✅ 色块从内缩 6/9px、近乎透明开始，200ms 内放大上浮到整行；`hover 3` 稳定后行内与边缘均为 `rgb(228,231,239)`（截图 `docs/crop-float.png`）；临时拉长到 900ms 采样：早期 `rgb(254,254,254)` 且边缘为白 → 结束满色 |
@@ -74,11 +74,11 @@ running 20 tests
 | Shift 强框选 | ✅ 行 `on_mouse_down` 在 Shift 时只扩展选择并开启 `rubber_band`，不再创建 `pending_drag`（不会触发 OLE 拖出）；框选累加逻辑与空白处一致（空白拖过行实测可选中「子目录」） |
 | Ctrl 复制 | ✅ 拖出时用 `GetAsyncKeyState(VK_CONTROL)` 判断复制模式，Shift 不再参与 |
 | 空白框选 | ✅ `state` 显示 `rubber_band:true`；蓝色选框覆盖拖拽区域（截图 `screenshot-rubber.png`）；行/卡片在拖拽经过时加入选择 |
-| explore 动词 | ✅ 启用后 `ShellExecuteExW(verb="explore")` 与 `verb="open"` 都会启动新的 FPilot 进程；停用后 `DelegateExecute` 恢复为 `{11dbb47c-...}` |
-| 替换资源管理器 | ✅ 写入 `Folder|Directory|Drive\shell\open\command` 与 `CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow\command`；`Start-Process` 打开文件夹、发送 Win+E 均会启动新的 FPilot 进程；关闭后原 Folder 命令/DelegateExecute 与 CLSID 键恢复 |
+| explore 动词 | ✅ 启用后 `ShellExecuteExW(verb="explore")` 与 `verb="open"` 都会启动新的 YKExplorer 进程；停用后 `DelegateExecute` 恢复为 `{11dbb47c-...}` |
+| 替换资源管理器 | ✅ 写入 `Folder|Directory|Drive\shell\open\command` 与 `CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow\command`；`Start-Process` 打开文件夹、发送 Win+E 均会启动新的 YKExplorer 进程；关闭后原 Folder 命令/DelegateExecute 与 CLSID 键恢复 |
 | 启动路径参数 | ✅ 以文件夹路径启动时 `state.path` 指向该目录（Explorer `"%1"` 调用可用） |
 | 字体/隐藏文件/菜单开关 | ✅ 开关生效，UI 即时刷新 |
-| 设置持久化 | ✅ 写入 `target\debug\fpilot.settings.json` 回退文件；重启后 `print=false` 等状态恢复 |
+| 设置持久化 | ✅ 写入 `target\debug\ykexplorer.settings.json` 回退文件；重启后 `print=false` 等状态恢复 |
 | 系统右键菜单项 | ✅ 打开方式、打印、管理员运行、PowerShell、Windows Terminal、属性按对象类型/开关显示 |
 | 菜单管理 | ✅ 关闭“打印”后文件右键菜单不再显示该项；图标/布局正常 |
 | 注册表菜单枚举 | ✅ `registry list` 返回 20 项（File 4 / Directory 10 / Background 6），标题、动词、hive 正确 |
@@ -94,7 +94,7 @@ running 20 tests
 | 拖入目标 | ✅ 内容区绑定当前目录；驱动器行/快速访问行绑定各自目录（非当前目录），代码层接线完成 |
 | 标题栏 | ✅ 用户实测通过；后台光标跟随线程 + `SetWindowPos` |
 | 拖出启动 | ✅ 物理光标/左键 watcher + 窗口子类（UI 线程执行 `DoDragDrop`）；日志确认 `window subclass installed` |
-| 跨程序拖放 | ✅ 用户实测成功（Explorer → FPilot 与 FPilot → Explorer 均正常），前提是进程为 Medium 完整性 |
+| 跨程序拖放 | ✅ 用户实测成功（Explorer → YKExplorer 与 YKExplorer → Explorer 均正常），前提是进程为 Medium 完整性 |
 | 拖回自身窗口崩溃 | ✅ 修复 gpui `DragQueryFileW` 传参后不再崩溃 |
 | 拖拽首选效果 | ⚠ 标准 Shell 对象不暴露自定义 Preferred DropEffect；允许 MOVE|COPY、Shift 只允许 COPY，最终由目标决定 |
 | 注册表菜单调用 | ✅ 代码走 `ShellExecuteExW` 动词；DelegateExecute 类动词可能失败并提示 |
@@ -116,8 +116,8 @@ running 20 tests
 
 ```text
 D:\Project\...\demo\数据.csv -> D:\Project\...\target\test-dest   ✅ 复制成功
-D:\Project\...\demo\数据.csv -> C:\Users\...\Temp\fpilot-test    ❌ os error 5
-D:\Project\...\demo\数据.csv -> E:\__fpilot_test                  ❌ os error 5
+D:\Project\...\demo\数据.csv -> C:\Users\...\Temp\ykexplorer-test    ❌ os error 5
+D:\Project\...\demo\数据.csv -> E:\__ykexplorer_test                  ❌ os error 5
 D:\Project\...\demo\数据.csv -> F:\                              ❌ os error 5
 ```
 
@@ -129,8 +129,8 @@ D:\Project\...\demo\数据.csv -> F:\                              ❌ os error 
 - 之前拖到侧栏 `F:` 行时，根元素仍把文件复制到**当前文件夹**，可能正好落在无写权限目录；
 - 现在驱动器行/快速位置行有自己的 `on_drop`，拖到 `F:` 会明确以 `F:\` 为目标，失败弹窗也会显示“目标：F:\...”。
 
-**验收建议**：用资源管理器双击启动 `dist\FPilot.exe`（不要在调试沙箱里启动），再试拖到 F 盘/侧栏 F 行。
-用户反馈 Windows Explorer 在同类目标会弹出权限确认框，确认后可复制；FPilot 目前没有自动提权重试，只显示错误。若需要，应增加“以管理员身份重试”或 IFileOperation 提权路径。
+**验收建议**：用资源管理器双击启动 `dist\YKExplorer.exe`（不要在调试沙箱里启动），再试拖到 F 盘/侧栏 F 行。
+用户反馈 Windows Explorer 在同类目标会弹出权限确认框，确认后可复制；YKExplorer 目前没有自动提权重试，只显示错误。若需要，应增加“以管理员身份重试”或 IFileOperation 提权路径。
 
 ## 5. 手工验收步骤（正常桌面）
 
@@ -140,14 +140,14 @@ D:\Project\...\demo\数据.csv -> F:\                              ❌ os error 
 
 ### B. 默认移动 / Shift 复制
 
-1. 打开 FPilot 到 demo 目录，另开资源管理器到目标目录。
+1. 打开 YKExplorer 到 demo 目录，另开资源管理器到目标目录。
 2. 把 `中文说明.txt` 拖到资源管理器：源文件应消失（移动）。
 3. 恢复文件；按住 Shift 开始拖：源文件应保留（复制）。
 
 ### C. 拖到 F 盘
 
 1. 在 F 盘根目录建一个目标目录或确认根目录可写。
-2. 从 FPilot 把文件拖到侧栏 `F:` 行，松开。
+2. 从 YKExplorer 把文件拖到侧栏 `F:` 行，松开。
 3. 预期：文件复制到 `F:\`，而不是当前标签所在目录。
 
 ### D. 系统右键菜单
@@ -160,7 +160,7 @@ D:\Project\...\demo\数据.csv -> F:\                              ❌ os error 
 
 1. 在搜索框输入关键词后按 **Enter**，应递归列出子文件夹中的匹配项；按 Esc 返回。
 2. 选中项目按 F2 重命名后按 **Ctrl+Z**，应恢复原名；删除到回收站后按 Ctrl+Z 应还原。
-3. 打开 **设置 → 常规**，确认“替换系统资源管理器”开关存在；打开后文件夹双击应由 FPilot 接管，关闭后恢复。
+3. 打开 **设置 → 常规**，确认“替换系统资源管理器”开关存在；打开后文件夹双击应由 YKExplorer 接管，关闭后恢复。
 2. 打开 **设置 → 上下文菜单**，应看到内置动作、注册表动词、Shell 扩展三组；注册表动词按文件/文件夹/空白处分组。
 2. 打开某一项的开关（如“通过 Code 打开”）。
 3. 回到文件列表，右键对应对象：菜单底部应出现该项；点击应启动对应程序。

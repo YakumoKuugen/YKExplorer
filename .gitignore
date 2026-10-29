@@ -7,6 +7,6 @@
 /tests*.log
 /*.png
 !/docs/*.png
-fpilot.settings.json
+ykexplorer.settings.json
 *.log
 /demo/

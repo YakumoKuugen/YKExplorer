@@ -30,7 +30,7 @@ use crate::drag_out::{self, DragOutcome};
 type WindowProc = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
 
 /// Private message used to run the drag on the UI thread.
-const WM_FPILOT_BEGIN_DRAG: u32 = WM_APP + 0x51;
+const WM_YKEXPLORER_BEGIN_DRAG: u32 = WM_APP + 0x51;
 static ORIGINAL_PROC: Mutex<Option<WindowProc>> = Mutex::new(None);
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
@@ -48,7 +48,7 @@ unsafe extern "system" fn subclass_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if msg == WM_FPILOT_BEGIN_DRAG {
+    if msg == WM_YKEXPLORER_BEGIN_DRAG {
         let pending = PENDING.lock().ok().and_then(|mut slot| slot.take());
         if let Some(pending) = pending {
             // Do NOT release the capture here: GPUI captured the mouse on
@@ -121,7 +121,7 @@ pub fn request_drag(hwnd: HWND, paths: Vec<PathBuf>, shift: bool) -> bool {
         }
         *slot = Some(PendingDrag { paths, shift });
     }
-    unsafe { PostMessageW(Some(hwnd), WM_FPILOT_BEGIN_DRAG, WPARAM(0), LPARAM(0)).is_ok() }
+    unsafe { PostMessageW(Some(hwnd), WM_YKEXPLORER_BEGIN_DRAG, WPARAM(0), LPARAM(0)).is_ok() }
 }
 
 /// Take the outcome of a finished drag, if any.

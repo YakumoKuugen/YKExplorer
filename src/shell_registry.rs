@@ -1,7 +1,7 @@
 //! Enumerate context-menu verbs registered in the Windows registry.
 //!
 //! Explorer builds its "classic" context menu from `shell` subkeys below
-//! `HKCU/HKLM\Software\Classes\...`. The same entries can be shown in FPilot
+//! `HKCU/HKLM\Software\Classes\...`. The same entries can be shown in YKExplorer
 //! and invoked through `ShellExecuteExW` with the verb name.
 
 use std::path::{Path, PathBuf};

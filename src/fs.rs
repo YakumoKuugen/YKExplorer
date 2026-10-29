@@ -715,7 +715,7 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("test-scratch")
-            .join(format!("fpilot-search-{}", std::process::id()));
+            .join(format!("ykexplorer-search-{}", std::process::id()));
         let nested = root.join("a").join("b");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(root.join("报告-根.txt"), b"1").unwrap();

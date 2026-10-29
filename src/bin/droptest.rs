@@ -1,7 +1,7 @@
-//! Diagnostic drop target used to verify that FPilot's outgoing drag data
+//! Diagnostic drop target used to verify that YKExplorer's outgoing drag data
 //! object can be consumed by another process.
 //!
-//! Run it, then start a synthetic drag from FPilot (`drag-host` debug command).
+//! Run it, then start a synthetic drag from YKExplorer (`drag-host` debug command).
 //! The probe creates a small top-most window under the cursor, registers
 //! itself as an OLE drop target, logs every format query and writes the result
 //! to `droptest.log`.
@@ -170,7 +170,7 @@ fn main() {
         let _ = OleInitialize(None);
     }
 
-    let class_name = windows::core::w!("FpilotDropProbe");
+    let class_name = windows::core::w!("YkExplorerDropProbe");
     let wc = WNDCLASSW {
         lpfnWndProc: Some(probe_wndproc),
         lpszClassName: class_name,
@@ -190,7 +190,7 @@ fn main() {
         CreateWindowExW(
             WS_EX_TOPMOST,
             class_name,
-            windows::core::w!("FPilot drop probe"),
+            windows::core::w!("YKExplorer drop probe"),
             WS_OVERLAPPED,
             x,
             y,

@@ -1,4 +1,4 @@
-# FPilot 实施计划表
+# YKExplorer 实施计划表
 
 ## 阶段与验收
 
@@ -15,7 +15,7 @@
 | 8 | 测试与交付 | 构建 release、中文回归、截图、README、已知问题 | 可执行文件 + 源码 + 文档 + 截图 | ✅ |
 | 9 | 用户反馈修复 | 标题栏移动、拖出可靠性/闪退、标准 Shell 数据对象、侧栏拖入、系统右键菜单、设置分页/持久化、无鼠标调试 IPC | 标题栏、跨程序拖放均已实测通过；F 盘需管理员继续/提权重试 | ✅ |
 | 12 | 递归搜索与撤销 | 搜索框 Enter 递归遍历子目录（上限 5000）并按相对路径显示；撤销栈支持重命名/新建/复制/移动/回收站还原（Ctrl+Z、右键菜单） | `search`/`undo` 实测通过；20 个单元测试 | ✅ |
-| 11 | 框选与资源管理器替换 | 列表空白处拖拽框选；设置 → 常规增加“替换系统资源管理器”，通过 HKCU 备份/恢复 Directory、Drive 的 open 命令，并支持 `"%1"` 启动路径 | 蓝色选框可选择经过的项；开关可逆，Explorer 双击文件夹打开 FPilot | ✅ |
+| 11 | 框选与资源管理器替换 | 列表空白处拖拽框选；设置 → 常规增加“替换系统资源管理器”，通过 HKCU 备份/恢复 Directory、Drive 的 open 命令，并支持 `"%1"` 启动路径 | 蓝色选框可选择经过的项；开关可逆，Explorer 双击文件夹打开 YKExplorer | ✅ |
 | 10 | 注册表右键菜单管理 | 枚举 `shell` 动词与 `shellex\ContextMenuHandlers` COM 扩展（`*`/Directory/Folder/Drive/Background），设置页逐项启用；动词用 `ShellExecuteExW`；COM 扩展预构建 `IContextMenu`，以二级菜单列出具体功能并直接 `InvokeCommand` | 设置 → 注册表菜单可管理；7-Zip、Beyond Compare 以二级菜单出现，功能项可区分并执行 | ✅ |
 
 ## 目标快捷键
@@ -49,5 +49,5 @@
 ## 备注
 
 - 本机 VS 2022 MSVC 在构建 `ring` 时会因 `/Z7` 触发 D8050；工程设置 `[profile.dev] debug = 0` 规避。
-- `build.ps1` 只负责 release 构建并把 `target\release\fpilot.exe` 复制为 `dist\FPilot.exe`；不是必要的 vcvars 引导脚本。
+- `build.ps1` 只负责 release 构建并把 `target\release\YKExplorer.exe` 复制为 `dist\YKExplorer.exe`；不是必要的 vcvars 引导脚本。
 - 所有图标/布局/代码均为独立实现，仅参考行为结论，不包含原程序二进制或资源。

@@ -1,4 +1,4 @@
-//! Per-user registration that makes FPilot the default handler for opening
+//! Per-user registration that makes YKExplorer the default handler for opening
 //! folders and drives, with a full backup/restore of the previous values.
 
 use std::path::PathBuf;
@@ -18,11 +18,11 @@ use windows::{
 
 const CLASSES: [&str; 3] = ["Folder", "Directory", "Drive"];
 const FILE_EXPLORER_CLSID: &str = "{52205fd8-5dfb-447d-801a-d0b52f2e83e1}";
-const FPILOT_KEY: &str = r"Software\FPilot";
+const YKEXPLORER_KEY: &str = r"Software\YKExplorer";
 const MARKER_VALUE: &str = "ReplaceExplorer";
 
 pub fn is_enabled() -> bool {
-    read_string(FPILOT_KEY, MARKER_VALUE).is_some()
+    read_string(YKEXPLORER_KEY, MARKER_VALUE).is_some()
 }
 
 pub fn enable() -> Result<(), String> {
@@ -31,14 +31,14 @@ pub fn enable() -> Result<(), String> {
     for class in CLASSES {
         enable_one(
             &format!(r"Software\Classes\{class}\shell\open"),
-            &format!(r"Software\FPilot\ExplorerBackup\{class}"),
+            &format!(r"Software\YKExplorer\ExplorerBackup\{class}"),
             &command,
         )?;
         // `explore` is a separate verb (Windows' "open in a new window" path).
         // Launchers that ask for it explicitly would otherwise open Explorer.
         enable_one(
             &format!(r"Software\Classes\{class}\shell\explore"),
-            &format!(r"Software\FPilot\ExplorerBackup\{class}-explore"),
+            &format!(r"Software\YKExplorer\ExplorerBackup\{class}-explore"),
             &command,
         )?;
     }
@@ -46,11 +46,11 @@ pub fn enable() -> Result<(), String> {
     // this CLSID. Overriding its OpenNewWindow verb is what File Pilot does.
     enable_one(
         &format!(r"Software\Classes\CLSID\{FILE_EXPLORER_CLSID}\shell\opennewwindow"),
-        r"Software\FPilot\ExplorerBackup\OpenNewWindow",
+        r"Software\YKExplorer\ExplorerBackup\OpenNewWindow",
         &format!("\"{}\"", exe.display()),
     )?;
     write_string(
-        FPILOT_KEY,
+        YKEXPLORER_KEY,
         MARKER_VALUE,
         &exe.to_string_lossy().into_owned(),
     )?;
@@ -61,18 +61,18 @@ pub fn disable() -> Result<(), String> {
     for class in CLASSES {
         disable_one(
             &format!(r"Software\Classes\{class}\shell\open"),
-            &format!(r"Software\FPilot\ExplorerBackup\{class}"),
+            &format!(r"Software\YKExplorer\ExplorerBackup\{class}"),
         )?;
         disable_one(
             &format!(r"Software\Classes\{class}\shell\explore"),
-            &format!(r"Software\FPilot\ExplorerBackup\{class}-explore"),
+            &format!(r"Software\YKExplorer\ExplorerBackup\{class}-explore"),
         )?;
     }
     disable_one(
         &format!(r"Software\Classes\CLSID\{FILE_EXPLORER_CLSID}\shell\opennewwindow"),
-        r"Software\FPilot\ExplorerBackup\OpenNewWindow",
+        r"Software\YKExplorer\ExplorerBackup\OpenNewWindow",
     )?;
-    let _ = delete_value(FPILOT_KEY, MARKER_VALUE);
+    let _ = delete_value(YKEXPLORER_KEY, MARKER_VALUE);
     Ok(())
 }
 
@@ -99,7 +99,7 @@ fn enable_one(open: &str, backup: &str, command: &str) -> Result<(), String> {
     // HKLM still contributes a DelegateExecute value that would win over our
     // command. Override it with an invalid CLSID so the shell falls back to
     // the command we just wrote.
-    write_string(&command_key, "DelegateExecute", "FPilotDisabled")?;
+    write_string(&command_key, "DelegateExecute", "YKExplorerDisabled")?;
     Ok(())
 }
 

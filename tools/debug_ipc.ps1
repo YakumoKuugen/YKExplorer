@@ -1,6 +1,6 @@
-# Send a line command to a debug-build FPilot instance.
-# Launch FPilot with: $env:FPILOT_DEBUG_PORT='47654'
-function Invoke-FpilotDebug {
+# Send a line command to a debug-build YKExplorer instance.
+# Launch YKExplorer with: $env:YKEXPLORER_DEBUG_PORT='47654'
+function Invoke-YKExplorerDebug {
     param(
         [Parameter(Mandatory = $true)][string]$Command,
         [int]$Port = 47654,

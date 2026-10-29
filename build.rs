@@ -25,14 +25,14 @@ fn main() {
         println!("cargo:warning=could not rasterise the icon");
         return;
     };
-    let ico_path = out_dir.join("fpilot.ico");
+    let ico_path = out_dir.join("ykexplorer.ico");
     if fs::write(&ico_path, &ico).is_err() {
-        println!("cargo:warning=could not write fpilot.ico");
+        println!("cargo:warning=could not write ykexplorer.ico");
         return;
     }
 
     // 1 ICON "<path>" -- the numeric id becomes the default application icon.
-    let rc_path = out_dir.join("fpilot.rc");
+    let rc_path = out_dir.join("ykexplorer.rc");
     let escaped = ico_path.display().to_string().replace('\\', "\\\\");
     if fs::write(&rc_path, format!("1 ICON \"{escaped}\"\n")).is_err() {
         println!("cargo:warning=could not write the resource script");
@@ -43,7 +43,7 @@ fn main() {
         println!("cargo:warning=rc.exe not found, executable icon not embedded");
         return;
     };
-    let res_path = out_dir.join("fpilot.res");
+    let res_path = out_dir.join("ykexplorer.res");
     let status = Command::new(rc)
         .arg("/nologo")
         .arg(format!("/fo{}", res_path.display()))

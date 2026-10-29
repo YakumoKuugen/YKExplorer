@@ -1,6 +1,6 @@
 //! Local-only, debug-build-only command channel.
 //!
-//! Enable with `FPILOT_DEBUG_PORT=47654` when launching a debug build. The
+//! Enable with `YKEXPLORER_DEBUG_PORT=47654` when launching a debug build. The
 //! channel is bound to 127.0.0.1 and is never compiled into release builds.
 //! It exists so UI/file behavior can be inspected without moving the user's
 //! physical mouse or stealing focus.

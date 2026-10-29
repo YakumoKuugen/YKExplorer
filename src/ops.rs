@@ -417,11 +417,11 @@ pub fn open_powershell(path: &Path) -> Result<(), String> {
         return Err("必须选择一个文件夹".into());
     }
     Command::new("powershell.exe")
-        .env("FPILOT_TARGET", path.as_os_str())
+        .env("YKEXPLORER_TARGET", path.as_os_str())
         .args([
             "-NoExit",
             "-Command",
-            "Set-Location -LiteralPath $env:FPILOT_TARGET",
+            "Set-Location -LiteralPath $env:YKEXPLORER_TARGET",
         ])
         .spawn()
         .map(|_| ())
@@ -448,7 +448,7 @@ mod tests {
             .join("target")
             .join("test-scratch");
         let dir = root.join(format!(
-            "fpilot-test-{}-{}",
+            "ykexplorer-test-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

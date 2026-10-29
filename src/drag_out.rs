@@ -3,7 +3,7 @@
 //! GPUI 0.2.2 handles file *drops into* a window, but it does not implement an
 //! OLE drag source. This module builds a minimal `CF_HDROP` data object and a
 //! drop source and calls `DoDragDrop`, which is what allows dragging from
-//! FPilot into Explorer, the desktop, chats, browsers and other applications.
+//! YKExplorer into Explorer, the desktop, chats, browsers and other applications.
 
 use std::{
     ffi::c_void,
@@ -467,7 +467,7 @@ impl IDropSource_Impl for FileDropSource_Impl {
 /// drag/drop and exposes the usual CF_HDROP / Shell IDList formats.
 /// Start a native file drag. `copy_if_shift` should be the shift state at the
 /// moment the drag threshold was crossed. Holding Shift limits the operation
-/// to copy, which is a deliberate FPilot choice (Windows itself uses Shift to
+/// to copy, which is a deliberate YKExplorer choice (Windows itself uses Shift to
 /// force a move in some shell contexts).
 struct ShellDragData {
     data: IDataObject,

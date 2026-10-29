@@ -1,4 +1,4 @@
-# FPilot — 设计说明
+# YKExplorer — 设计说明
 
 > 一个参考 File Pilot 行为与反编译资料、用 **Rust + GPUI** 重写的 Windows 文件资源管理器。
 > 不复用原程序的二进制、图标、字体或私有资源；UI 与实现均重新创作。
@@ -136,7 +136,7 @@
 ```
 src/
 ├─ main.rs           Application 初始化、快捷键、打开窗口
-├─ app.rs            PilotApp：状态、动作、导航、拖放接线、全部 UI（标题栏/
+├─ app.rs            ExplorerApp：状态、动作、导航、拖放接线、全部 UI（标题栏/
 │                    面包屑/侧栏/详情/宫格/预览/弹窗/菜单/Toast）
 ├─ fs.rs             目录枚举、元数据、驱动器、用户目录、格式化、排序筛选
 ├─ ops.rs            复制/移动/回收站/重命名/新建/冲突改名/Shell 打开
@@ -149,7 +149,7 @@ src/
 └─ tools/            图标生成与离线 UI 自动化脚本（开发用）
 ```
 
-数据流：`PilotApp` 是唯一根 View；每个标签页保存路径、历史、条目、选中；所有文件任务走 GPUI background executor，完成后用 `WeakEntity` 回主线程更新，防止阻塞 UI。
+数据流：`ExplorerApp` 是唯一根 View；每个标签页保存路径、历史、条目、选中；所有文件任务走 GPUI background executor，完成后用 `WeakEntity` 回主线程更新，防止阻塞 UI。
 
 ## 5. API 调研结论（gpui 0.2.2 / Windows）
 
@@ -234,7 +234,7 @@ GPUI 0.2.2 的 `Window::start_window_move()` 在 Windows 后端是空实现。�
 - 设计上仍是“外部拖入 = 复制”，不擅自删除源文件。
 
 > 注意：本次验证的调试实例运行在外层文件沙箱中，只有 D: 可写；F:/E:/C:\Temp 均被拒绝。
-> 正常桌面启动的 `dist\FPilot.exe` 不受这个外层限制，应由用户按 README 手工验证 F 盘。
+> 正常桌面启动的 `dist\YKExplorer.exe` 不受这个外层限制，应由用户按 README 手工验证 F 盘。
 
 ### 4. 系统右键菜单子集与设置
 
@@ -242,12 +242,12 @@ GPUI 0.2.2 的 `Window::start_window_move()` 在 Windows 后端是空实现。�
 - PowerShell/Windows Terminal 通过子进程启动；
 - 菜单项根据右键对象类型、可执行扩展名与设置开关动态显示；
 - 设置弹窗分为「常规 / 上下文菜单」两页；上下文菜单页用单列表统一管理内置动作、注册表动词和 Shell 扩展，开关保存到
-  `%APPDATA%\FPilot\settings.json`，失败时回退到 exe 同目录 `fpilot.settings.json`；
+  `%APPDATA%\YKExplorer\settings.json`，失败时回退到 exe 同目录 `ykexplorer.settings.json`；
 - 字体、隐藏文件、替换资源管理器、内置动作、注册表动词、Shell 扩展启用项一并持久化。
-- 替换资源管理器只写 HKCU：`Software\Classes\Folder|Directory|Drive\shell\open\command` 以及 `shell\explore\command`（`explore` 与 `open` 是两个独立动词，`ShellExecute` 显式传 "explore" 时走后者），并把原命令、值类型、DelegateExecute、键是否存在备份到 `Software\FPilot\ExplorerBackup`；HKLM 仍会提供 Explorer 的 `DelegateExecute`，因此启用时把它覆盖为无效值 `FPilotDisabled`，Shell 会回退到 command；关闭时按原类型恢复 `Folder` 的 `%SystemRoot%\Explorer.exe` 与 DelegateExecute，或删除自建的 Directory/Drive 键。
+- 替换资源管理器只写 HKCU：`Software\Classes\Folder|Directory|Drive\shell\open\command` 以及 `shell\explore\command`（`explore` 与 `open` 是两个独立动词，`ShellExecute` 显式传 "explore" 时走后者），并把原命令、值类型、DelegateExecute、键是否存在备份到 `Software\YKExplorer\ExplorerBackup`；HKLM 仍会提供 Explorer 的 `DelegateExecute`，因此启用时把它覆盖为无效值 `YKExplorerDisabled`，Shell 会回退到 command；关闭时按原类型恢复 `Folder` 的 `%SystemRoot%\Explorer.exe` 与 DelegateExecute，或删除自建的 Directory/Drive 键。
 - 额外接管 `HKCU\Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow\command`。该 CLSID 的显示名就是 “File Explorer”，开始菜单的“文件管理器”和 Win+E 都走它的 `OpenNewWindow`；这是 File Pilot 的做法。
 - 图标：`assets/icons/explorer.svg` 是唯一来源，`build.rs` 用 `resvg`（build-dependency）按 7 个尺寸光栅化并写入 ICO，再用 `rc.exe` 生成 `.res` 通过 `cargo:rustc-link-arg-bins` 链入 exe；找不到 `rc.exe` 时静默跳过。
-- 配置：单一文件 `%APPDATA%\FPilot\config.json`（`dirs::config_dir()`），不再往程序目录写配置，因此重装不影响；首次启动若没有 `config.json`，会依次尝试读取旧的 `%APPDATA%\FPilot\settings.json` 与程序目录的 `fpilot.settings.json`，成功后写入 `config.json` 并将旧文件改名为 `*.json.migrated`。字段全部带 `#[serde(default)]`，新增设置项不会让旧配置失效。
+- 配置：单一文件 `%APPDATA%\YKExplorer\config.json`（`dirs::config_dir()`），不再往程序目录写配置，因此重装不影响；首次启动若没有 `config.json`，会依次尝试读取旧的 `%APPDATA%\YKExplorer\settings.json` 与程序目录的 `ykexplorer.settings.json`，成功后写入 `config.json` 并将旧文件改名为 `*.json.migrated`。字段全部带 `#[serde(default)]`，新增设置项不会让旧配置失效。
 - 快速访问：`quick_places` 是 `Vec<QuickPlace>`，持久化为路径数组；`fs::quick_place_for()` 对内置路径复用原有名称/图标，其余用文件夹名。侧栏条目按下时调用 `SetCapture` 抓取鼠标（否则指针离开窗口就收不到移动/松开），记录 `place_drag`、起点与当前位置，拖动期间由 `track_place_drag` 每 16ms 轮询 `GetCursorPos`（GPUI 在指针离开窗口后不再派发 move，不能依赖事件），据此更新幽灵位置与「是否离开原行」，并用 `GetAsyncKeyState(VK_LBUTTON)` 判断按键抬起——即使松手在窗口外也能结算。幽灵仍是 GPUI 元素（圆角卡片：图标 + 名称 + 状态提示，离开原行时边框与提示变红），由轮询到的光标位置驱动；指针移出窗口时卡片自动隐藏（窗口无法绘制到自身之外），但拖拽判定与移除仍然生效；结算以松开坐标为据——x ≤ 232 且 |Δy| ≤ 18（即回到原来那一行）取消，其余情况（含窗口外负坐标）移除；结算后 `ReleaseCapture`；指针在窗口外时隐藏幽灵卡片。若 mouse-up 仍丢失，下一次移动发现按键已抬起即就地结算，不再依赖移动事件——GPUI 的 move 只在指针仍在该元素上时才派发，拖出行外就收不到。行内 mouse-up 与根节点兜底都用事件位置判断，避免先命中行内处理器时吞掉手势；侧栏滚动区与分组标题都是拖放目标：拖入的都是文件夹则固定到快速访问，否则沿用原来的复制到该位置。设置页只列出 `fs::quick_places()` 的默认项，按路径判断开关状态。
 - 悬停高亮：`hovered_row` / `hover_prev`（列表）与 `hovered_side` / `hover_prev_side`（侧栏）记录光标进出，分别用 `hover_generation` 与 `side_generation` 计数，避免互相互相重置动画。`slide_block()` 始终返回一个**绝对定位**色块：空闲时透明度 0，悬停时用 `with_animation`（200ms，`ease_out_quint`）把上下左右内缩量从 6/9px 收到 0、透明度 0→1，形成"从后方浮起"的效果。节点常驻且类型一致（都是 `AnimationElement<Div>`），避免 element tree 变化导致 hitbox 抖动、hover 事件反复触发。选中行传入 `selected_tint`，渲染为静态圆角色块（`accent_soft`）；列表通过 `side_inset = 6px` 让色块左右各留一段空白（与侧栏一致），行本身去掉底部分隔线。
 - 打开反馈：`open_flash` 保存 `(文件名, 计数)`，渲染为底部居中卡片，`with_animation` 做 160ms 淡入 + 上移，定时器 620ms 后清除；必须 `cx.notify()` 触发首帧。
@@ -277,10 +277,10 @@ GPUI 0.2.2 的 `Window::start_window_move()` 在 Windows 后端是空实现。�
 - 只保留在当前 64 位进程中存在 `InprocServer32` 的 CLSID；跳过位于 `%SystemRoot%`
   的系统处理器；
 - 注册表只保存 DLL 路径，没有命令行；功能项由扩展的 `IContextMenu` 在运行时生成；
-- 打开 FPilot 右键菜单时，对每个启用的扩展：
+- 打开 YKExplorer 右键菜单时，对每个启用的扩展：
   `CoCreateInstance` → `IShellExtInit::Initialize(folder pidl, shell data object)`
   → `IContextMenu::QueryContextMenu` 到隐藏 `HMENU`，递归读取菜单项与命令 ID；
-- FPilot 只渲染两级：主菜单中是扩展名（如“7-Zip ›”“Beyond Compare ›”），
+- YKExplorer 只渲染两级：主菜单中是扩展名（如“7-Zip ›”“Beyond Compare ›”），
   鼠标悬停一级项展开二级菜单，点击一级项不执行动作；更深的子菜单（CRC SHA 内部）拍平到二级；
 - `HandlerMenu` 在菜单打开期间持有 `IContextMenu` 与 `HMENU`；点击具体项时
   直接 `InvokeCommand`（命令 ID），不显示扩展自己的原生菜单；
@@ -288,7 +288,7 @@ GPUI 0.2.2 的 `Window::start_window_move()` 在 Windows 后端是空实现。�
 
 ### 5. 无鼠标调试
 
-新增仅 debug 构建启用的本地 TCP 调试通道（`--debug-port` / `FPILOT_DEBUG_PORT`），
+新增仅 debug 构建启用的本地 TCP 调试通道（`--debug-port` / `YKEXPLORER_DEBUG_PORT`），
 支持 state/navigate/view/settings/select/context-menu/copy-test/list 等命令；
 配合 `PrintWindow` 截图，不再需要移动用户鼠标。
 
@@ -301,7 +301,7 @@ thread 'main' panicked at gpui-0.2.2/src/app/async_context.rs:57:
 RefCell already borrowed
 ...
 DoDragDrop
-fpilot::drag_out::start_file_drag
+yk_explorer::drag_out::start_file_drag
 gpui::app::App::flush_effects
 ```
 
@@ -323,7 +323,7 @@ gpui::app::App::flush_effects
    `vendor/gpui` 并用 `[patch.crates-io]` 接入，修正为直接传 `HDROP(hGlobal)`。
 2. **UIPI**：调试实例从被沙箱标记为 Low 完整性的 `dist` 目录启动，进程为 Low；
    Explorer 为 Medium。Windows 阻止 Low → Medium 的 OLE 拖放，目标不查询数据对象直接返回
-   `DROPEFFECT_NONE`。改为从普通目录启动（Medium）后，用户实测 FPilot → Explorer 成功。
+   `DROPEFFECT_NONE`。改为从普通目录启动（Medium）后，用户实测 YKExplorer → Explorer 成功。
 
 最终拖放方案：**Shell `IShellItemArray -> BHID_DataObject` 数据对象 + UI 线程窗口子类 +
 保留源窗口鼠标捕获**；自研 `CF_HDROP` 对象保留为回退。

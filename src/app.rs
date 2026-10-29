@@ -26,7 +26,7 @@ use crate::{
 };
 
 actions!(
-    fpilot,
+    yk_explorer,
     [
         Back,
         Forward,
@@ -362,7 +362,7 @@ impl Default for ShellMenuPrefs {
     }
 }
 
-/// One reversible user action. Kept newest-last in `PilotApp::undo_stack`.
+/// One reversible user action. Kept newest-last in `ExplorerApp::undo_stack`.
 #[derive(Clone, Debug)]
 enum UndoAction {
     Rename { from: PathBuf, to: PathBuf },
@@ -383,7 +383,7 @@ struct PersistedSettings {
     quick_places: Option<Vec<PathBuf>>,
 }
 
-pub struct PilotApp {
+pub struct ExplorerApp {
     focus_handle: FocusHandle,
     tabs: Vec<TabState>,
     active_tab: usize,
@@ -437,13 +437,13 @@ pub struct PilotApp {
     window_handle: Option<windows::Win32::Foundation::HWND>,
 }
 
-impl Focusable for PilotApp {
+impl Focusable for ExplorerApp {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
-impl PilotApp {
+impl ExplorerApp {
     #[cfg(debug_assertions)]
     pub(crate) fn start_debug_worker(
         &mut self,
@@ -2428,7 +2428,7 @@ impl PilotApp {
                             || error.contains("Access is denied")
                             || error.contains("os error 5")
                     }) {
-                        "\n\n提示：目标目录可能没有写权限。请检查文件夹安全设置；若系统策略限制当前进程，可尝试以管理员身份运行 FPilot。"
+                        "\n\n提示：目标目录可能没有写权限。请检查文件夹安全设置；若系统策略限制当前进程，可尝试以管理员身份运行 YKExplorer。"
                     } else {
                         ""
                     };
@@ -3021,7 +3021,7 @@ impl PilotApp {
                 Ok(()) => {
                     self.replace_explorer = true;
                     self.save_settings();
-                    self.show_toast("已将 FPilot 设为默认文件夹打开方式", ToastKind::Success, cx);
+                    self.show_toast("已将 YKExplorer 设为默认文件夹打开方式", ToastKind::Success, cx);
                 }
                 Err(error) => self.show_error("设置默认打开方式失败", error),
             }
@@ -3365,7 +3365,7 @@ impl PilotApp {
 /// The single config file. It lives in the user profile, so replacing or
 /// reinstalling the application folder never resets it.
 fn config_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|base| base.join("FPilot"))
+    dirs::config_dir().map(|base| base.join("YKExplorer"))
 }
 
 fn config_file() -> Option<PathBuf> {
@@ -3380,7 +3380,7 @@ fn legacy_settings_files() -> Vec<PathBuf> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            paths.push(parent.join("fpilot.settings.json"));
+            paths.push(parent.join("ykexplorer.settings.json"));
         }
     }
     paths
@@ -3501,7 +3501,7 @@ fn build_fallbacks(chosen: &str, available: &[String]) -> Vec<String> {
     }
     fallbacks
 }
-impl PilotApp {
+impl ExplorerApp {
     fn render_titlebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let active = self.active_tab;
         let tabs_data: Vec<_> = self
@@ -4586,7 +4586,7 @@ impl PilotApp {
     }
 }
 
-impl Render for PilotApp {
+impl Render for ExplorerApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.window_handle.is_none() {
             if let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) {
@@ -4807,7 +4807,7 @@ impl Render for PilotApp {
     }
 }
 
-impl PilotApp {
+impl ExplorerApp {
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let error = self.active().error.clone();
         let loading = self.active().loading;
@@ -5669,7 +5669,7 @@ fn type_tile(icon: &'static str, color: gpui::Hsla, label: &str, icon_size: f32)
         )
 }
 
-fn open_entry_from_card(weak: gpui::WeakEntity<PilotApp>, entry: FileEntry, cx: &mut App) {
+fn open_entry_from_card(weak: gpui::WeakEntity<ExplorerApp>, entry: FileEntry, cx: &mut App) {
     if let Some(app) = weak.upgrade() {
         let _ = app.update(cx, |app, cx| app.open_entry(entry, false, cx));
     }
@@ -5771,7 +5771,7 @@ fn details_row(
     hover: Option<(bool, bool)>,
     hover_generation: u64,
     search_root: Option<PathBuf>,
-    weak: gpui::WeakEntity<PilotApp>,
+    weak: gpui::WeakEntity<ExplorerApp>,
     focus: FocusHandle,
 ) -> AnyElement {
     let path_left = entry.path.clone();
@@ -5942,7 +5942,7 @@ fn grid_card(
     hover: Option<(bool, bool)>,
     hover_generation: u64,
     search_root: Option<PathBuf>,
-    weak: gpui::WeakEntity<PilotApp>,
+    weak: gpui::WeakEntity<ExplorerApp>,
     focus: FocusHandle,
     card_width: f32,
 ) -> AnyElement {
@@ -6137,7 +6137,7 @@ fn grid_card(
     base.into_any_element()
 }
 
-impl PilotApp {
+impl ExplorerApp {
     fn render_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut overlays = Vec::new();
         if self.context_menu.is_some() {
@@ -6907,7 +6907,7 @@ impl PilotApp {
                                 .text_color(theme::text_faint())
                                 .child("拖放行为"),
                         )
-                        .child("从 FPilot 拖到资源管理器 / 桌面 / 其他程序：默认移动。")
+                        .child("从 YKExplorer 拖到资源管理器 / 桌面 / 其他程序：默认移动。")
                         .child("拖动开始时按住 Ctrl：改为复制。")
                         .child("按住 Shift 拖动：强制框选，不拖出文件。"),
                 );
@@ -7387,7 +7387,7 @@ impl PilotApp {
                                         div()
                                             .text_size(px(10.5))
                                             .text_color(theme::text_faint())
-                                            .child("FPilot · GPUI 原生"),
+                                            .child("YKExplorer · GPUI 原生"),
                                     ),
                             ),
                     )
