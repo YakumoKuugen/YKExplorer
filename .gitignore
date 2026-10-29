@@ -1,0 +1,12 @@
+/target/
+/dist/
+/run_*.log
+/run_*.txt
+/build*.log
+/release.log
+/tests*.log
+/*.png
+!/docs/*.png
+fpilot.settings.json
+*.log
+/demo/
