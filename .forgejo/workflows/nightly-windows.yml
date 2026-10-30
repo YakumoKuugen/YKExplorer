@@ -2,8 +2,9 @@ name: Nightly Windows Build
 
 on:
   schedule:
-    # 00:00 Asia/Shanghai (UTC+8). Forgejo cron is evaluated in UTC.
-    - cron: '0 16 * * *'
+    # Every day at 00:00 Asia/Shanghai.
+    - cron: '0 0 * * *'
+      timezone: Asia/Shanghai
   workflow_dispatch:
     inputs:
       force:
@@ -17,9 +18,9 @@ permissions:
 jobs:
   build:
     name: Build Windows package
-    # If the self-hosted runner uses a different label, change this value
-    # (for example: [self-hosted, windows]).
-    runs-on: windows-latest
+    # Optional repository variable WINDOWS_RUNNER overrides the default label.
+    # For a self-hosted runner, set it to e.g. [self-hosted, windows].
+    runs-on: ${{ vars.WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 90
 
     steps:
