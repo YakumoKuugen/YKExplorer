@@ -18,8 +18,10 @@ permissions:
 jobs:
   build:
     name: Build Windows package
-    # Optional repository variable WINDOWS_RUNNER overrides the default label.
-    # For a self-hosted runner, set it to e.g. [self-hosted, windows].
+    # Optional repository variable WINDOWS_RUNNER overrides the default label
+    # (use one label, e.g. windows or self-hosted). For multiple labels,
+    # replace this line with a YAML array such as:
+    # runs-on: [self-hosted, windows]
     runs-on: ${{ vars.WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 90
 
