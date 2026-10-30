@@ -5,35 +5,35 @@
 > 本项目只借鉴交互与信息架构；没有复用 File Pilot 的二进制、私有图标、字体或源码。  
 > 与 Voidstar / File Pilot 官方无关。
 
-![YKExplorer 界面](docs/screenshot.png)
+![YKExplorer 界面](./docs/screenshot.png)
 
 宫格视图：
 
-![YKExplorer 宫格视图](docs/screenshot-grid.png)
+![YKExplorer 宫格视图](./docs/screenshot-grid.png)
 
 系统右键菜单与上下文菜单管理：
 
-![YKExplorer 系统右键菜单](docs/screenshot-menu.png)
+![YKExplorer 系统右键菜单](./docs/screenshot-menu.png)
 
-![YKExplorer 上下文菜单设置](docs/screenshot-settings.png)
+![YKExplorer 上下文菜单设置](./docs/screenshot-settings.png)
 
 注册表右键菜单管理：
 
-![YKExplorer 上下文菜单设置（内置动作 + 注册表动词 + Shell 扩展）](docs/screenshot-settings.png)
+![YKExplorer 上下文菜单设置（内置动作 + 注册表动词 + Shell 扩展）](./docs/screenshot-settings.png)
 
-![YKExplorer Shell 扩展二级菜单](docs/screenshot-shellex-submenu.png)
+![YKExplorer Shell 扩展二级菜单](./docs/screenshot-shellex-submenu.png)
 
-![空白处拖拽框选](docs/screenshot-rubber.png)
+![空白处拖拽框选](./docs/screenshot-rubber.png)
 
-![替换系统资源管理器设置](docs/screenshot-settings-general.png)
+![替换系统资源管理器设置](./docs/screenshot-settings-general.png)
 
 Shell 扩展（COM）管理：
 
-![YKExplorer Shell 扩展设置](docs/screenshot-shellex-settings.png)
+![YKExplorer Shell 扩展设置](./docs/screenshot-shellex-settings.png)
 
-![7-Zip 与 Beyond Compare 作为二级菜单](docs/screenshot-shellex-menu.png)
+![7-Zip 与 Beyond Compare 作为二级菜单](./docs/screenshot-shellex-menu.png)
 
-![7-Zip 二级菜单中的多个功能项](docs/screenshot-shellex-submenu.png)
+![7-Zip 二级菜单中的多个功能项](./docs/screenshot-shellex-submenu.png)
 
 ## 特性
 
