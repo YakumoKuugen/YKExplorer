@@ -70,8 +70,7 @@ running 20 tests
 | 撤销：新建 | ✅ `mkdir-test 撤销测试目录` 后 `undo` 删除该目录 |
 | 撤销：复制/移动 | ✅ 复制后用 `undo` 删除副本、源文件保留；移动后用 `undo` 把文件移回原目录 |
 | 撤销：回收站 | ✅ `trash` 后 `undo` 通过 `trash::os_limited::restore_all` 从回收站还原文件 |
-| Shift 替换选择 | ✅ 先选中文件 A，再 Shift 拖过其它行：A 被清除，只剩框内条目；`pending_drag` 始终为 null |
-| Shift 强框选 | ✅ 行 `on_mouse_down` 在 Shift 时只扩展选择并开启 `rubber_band`，不再创建 `pending_drag`（不会触发 OLE 拖出）；框选累加逻辑与空白处一致（空白拖过行实测可选中「子目录」） |
+| Shift 累加框选 | ✅ 已选 4、5 后，按住 Shift 从 1 拖到 2：结果为 1、2、4、5；`pending_drag` 始终为 null，不会触发 OLE 拖出 |
 | Ctrl 复制 | ✅ 拖出时用 `GetAsyncKeyState(VK_CONTROL)` 判断复制模式，Shift 不再参与 |
 | 空白框选 | ✅ `state` 显示 `rubber_band:true`；蓝色选框覆盖拖拽区域（截图 `screenshot-rubber.png`）；行/卡片在拖拽经过时加入选择 |
 | explore 动词 | ✅ 启用后 `ShellExecuteExW(verb="explore")` 与 `verb="open"` 都会启动新的 YKExplorer 进程；停用后 `DelegateExecute` 恢复为 `{11dbb47c-...}` |

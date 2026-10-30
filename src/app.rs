@@ -203,6 +203,7 @@ struct EditorSession {
     editor: Entity<TextInput>,
     target: EditTarget,
     _subscription: Subscription,
+    _blur_subscription: Option<Subscription>,
 }
 
 enum Modal {
@@ -399,6 +400,7 @@ pub struct ExplorerApp {
     fallback_fonts: Vec<String>,
     font_options: Vec<String>,
     editor: Option<EditorSession>,
+    activation_subscription: Option<Subscription>,
     modal: Option<Modal>,
     context_menu: Option<ContextMenuState>,
     toast: Option<Toast>,
@@ -415,6 +417,7 @@ pub struct ExplorerApp {
     context_submenu: Option<usize>,
     context_submenu_position: Option<Point<Pixels>>,
     rubber_band: Option<(Point<Pixels>, Point<Pixels>)>,
+    rubber_band_additive: bool,
     undo_stack: Vec<UndoAction>,
     close_hovered: bool,
     hovered_row: Option<usize>,
@@ -779,6 +782,7 @@ impl ExplorerApp {
             "rubber" => {
                 if argument.trim() == "off" {
                     self.rubber_band = None;
+                    self.rubber_band_additive = false;
                     cx.notify();
                     "ok rubber off".to_string()
                 } else {
@@ -786,6 +790,7 @@ impl ExplorerApp {
                         Point::new(px(280.), px(230.)),
                         Point::new(px(760.), px(560.)),
                     ));
+                    self.rubber_band_additive = false;
                     cx.notify();
                     "ok rubber on".to_string()
                 }
@@ -1106,6 +1111,7 @@ impl ExplorerApp {
             fallback_fonts,
             font_options,
             editor: None,
+            activation_subscription: None,
             modal: None,
             context_menu: None,
             toast: None,
@@ -1122,6 +1128,7 @@ impl ExplorerApp {
             context_submenu: None,
             context_submenu_position: None,
             rubber_band: None,
+            rubber_band_additive: false,
             undo_stack: Vec::new(),
             close_hovered: false,
             hovered_row: None,
@@ -1548,11 +1555,32 @@ impl ExplorerApp {
             this.on_editor_event(&target_for_sub, event, cx);
         });
         let focus = editor.read(cx).focus_handle.clone();
+        // The address bar is a transient overlay: if focus leaves it (clicking
+        // another control, switching windows), discard the edit state instead
+        // of leaving a stale path editor in the toolbar.
+        let blur_subscription = if matches!(&target, EditTarget::Path) {
+            Some(cx.on_blur(&focus, window, |this, window, cx| {
+                if this
+                    .editor
+                    .as_ref()
+                    .is_some_and(|session| matches!(session.target, EditTarget::Path))
+                {
+                    this.editor = None;
+                    if !window.is_window_active() {
+                        this.pending_focus_list = true;
+                    }
+                    cx.notify();
+                }
+            }))
+        } else {
+            None
+        };
         log::debug!("begin edit: {:?}", target);
         self.editor = Some(EditorSession {
             editor,
             target,
             _subscription: subscription,
+            _blur_subscription: blur_subscription,
         });
         self.modal = None;
         window.focus(&focus);
@@ -1585,6 +1613,22 @@ impl ExplorerApp {
     fn close_editor(&mut self) {
         self.editor = None;
         self.pending_focus_list = true;
+    }
+
+    /// Close the address bar without moving keyboard focus. Used when the user
+    /// clicks somewhere else; the click target keeps (or takes) focus itself.
+    fn dismiss_path_editor(&mut self, cx: &mut Context<Self>) -> bool {
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|session| matches!(session.target, EditTarget::Path))
+        {
+            self.editor = None;
+            cx.notify();
+            true
+        } else {
+            false
+        }
     }
 
     fn on_editor_event(
@@ -1782,6 +1826,24 @@ impl ExplorerApp {
         cx.notify();
     }
 
+    /// Grow an additive Shift-marquee from its anchor to `index`, preserving
+    /// everything that was selected before the drag started.
+    fn extend_rubber_selection(&mut self, index: usize, cx: &mut Context<Self>) {
+        let tab = self.active_mut();
+        let start = tab.anchor.min(index);
+        let end = tab.anchor.max(index);
+        let mut changed = false;
+        for i in start..=end {
+            if let Some(path) = tab.entry_at_visible(i).map(|entry| entry.path.clone()) {
+                changed |= tab.selected.insert(path);
+            }
+        }
+        tab.cursor = index;
+        if changed {
+            cx.notify();
+        }
+    }
+
     fn toggle_display_index(&mut self, index: usize, cx: &mut Context<Self>) {
         let tab = self.active_mut();
         let Some(path) = tab.entry_at_visible(index).map(|e| e.path.clone()) else {
@@ -1807,14 +1869,15 @@ impl ExplorerApp {
         if event.modifiers.control {
             self.toggle_display_index(visible_index, cx);
         } else if event.modifiers.shift {
-            // Shift always means "rubber band": start a fresh marquee from this
-            // point instead of dragging the file out. Whatever was selected
-            // before is dropped, matching "select only what the box covers".
-            self.active_mut().selected.clear();
-            self.active_mut().selected.insert(path.to_path_buf());
-            self.active_mut().cursor = visible_index;
-            self.active_mut().anchor = visible_index;
+            // Shift starts an additive marquee: keep the existing selection and
+            // grow it as the pointer crosses rows. This makes it possible to
+            // select 4-5, release, then Shift-drag 1-2 and end up with 1,2,4,5.
+            let tab = self.active_mut();
+            tab.selected.insert(path.to_path_buf());
+            tab.cursor = visible_index;
+            tab.anchor = visible_index;
             self.rubber_band = Some((event.position, event.position));
+            self.rubber_band_additive = true;
         } else {
             let already_selected = self.active().selected.contains(path);
             if !already_selected {
@@ -3873,7 +3936,6 @@ impl ExplorerApp {
                         .text_color(theme::accent())
                         .hover(|this| this.bg(theme::accent_soft()))
                         .on_click(cx.listener(|this, _, window, cx| {
-                            window.focus(&this.focus_handle);
                             this.submit_current_editor(window, cx);
                         }))
                         .child(
@@ -3883,9 +3945,15 @@ impl ExplorerApp {
                                 .text_color(theme::accent()),
                         ),
                 )
-                .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    cx.stop_propagation();
                     window.focus(&focus);
                 })
+                .on_mouse_down_out(cx.listener(
+                    |this, _: &MouseDownEvent, _, cx| {
+                        this.dismiss_path_editor(cx);
+                    },
+                ))
                 .into_any_element()
         } else {
             div()
@@ -4561,7 +4629,7 @@ impl ExplorerApp {
             .child(
                 div()
                     .text_color(theme::text_faint())
-                    .child("拖动：移动 · 按住 Ctrl：复制 · Shift+拖动：框选"),
+                    .child("拖动：移动 · 按住 Ctrl：复制 · Shift+拖动：累加框选"),
             )
             .child(
                 div()
@@ -4595,6 +4663,17 @@ impl Render for ExplorerApp {
                         Some(windows::Win32::Foundation::HWND(raw.hwnd.get() as *mut _));
                 }
             }
+        }
+        if self.activation_subscription.is_none() {
+            // Focus listeners only run while a frame is drawn. A minimized or
+            // fully deactivated window may skip those frames, so also react to
+            // the activation change itself and drop the address-bar editor.
+            self.activation_subscription =
+                Some(cx.observe_window_activation(window, |this, window, cx| {
+                    if !window.is_window_active() && this.dismiss_path_editor(cx) {
+                        this.pending_focus_list = true;
+                    }
+                }));
         }
         if !self.initial_focus_done {
             self.initial_focus_done = true;
@@ -4735,6 +4814,7 @@ impl Render for ExplorerApp {
                     this.finish_place_drag(event.position, cx);
                 }
                 if this.rubber_band.take().is_some() {
+                    this.rubber_band_additive = false;
                     cx.notify();
                 }
                 if this.editor.is_none() {
@@ -5151,6 +5231,7 @@ impl ExplorerApp {
                 this.active_mut().selected.clear();
                 this.context_menu = None;
                 this.rubber_band = Some((event.position, event.position));
+                this.rubber_band_additive = false;
                 cx.notify();
             }),
             )
@@ -5158,6 +5239,7 @@ impl ExplorerApp {
                 if let Some((start, _)) = this.rubber_band {
                     if !crate::drag_out::left_button_down() {
                         this.rubber_band = None;
+                        this.rubber_band_additive = false;
                     } else {
                         this.rubber_band = Some((start, event.position));
                     }
@@ -5166,6 +5248,7 @@ impl ExplorerApp {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 if this.rubber_band.take().is_some() {
+                    this.rubber_band_additive = false;
                     cx.notify();
                 }
             }))
@@ -5261,6 +5344,7 @@ impl ExplorerApp {
                 this.active_mut().selected.clear();
                 this.context_menu = None;
                 this.rubber_band = Some((event.position, event.position));
+                this.rubber_band_additive = false;
                 cx.notify();
             }),
             )
@@ -5268,6 +5352,7 @@ impl ExplorerApp {
                 if let Some((start, _)) = this.rubber_band {
                     if !crate::drag_out::left_button_down() {
                         this.rubber_band = None;
+                        this.rubber_band_additive = false;
                     } else {
                         this.rubber_band = Some((start, event.position));
                     }
@@ -5276,6 +5361,7 @@ impl ExplorerApp {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 if this.rubber_band.take().is_some() {
+                    this.rubber_band_additive = false;
                     cx.notify();
                 }
             }))
@@ -5850,7 +5936,9 @@ fn details_row(
                 let path = path_move.clone();
                 let _ = app.update(cx, |app, cx| {
                     if app.rubber_band.is_some() && crate::drag_out::left_button_down() {
-                        if app.active_mut().selected.insert(path) {
+                        if app.rubber_band_additive {
+                            app.extend_rubber_selection(display_index, cx);
+                        } else if app.active_mut().selected.insert(path) {
                             cx.notify();
                         }
                     }
@@ -5862,6 +5950,7 @@ fn details_row(
                 let _ = app.update(cx, |app, cx| {
                     app.pending_drag = None;
                     if app.rubber_band.take().is_some() {
+                        app.rubber_band_additive = false;
                         cx.notify();
                     }
                 });
@@ -6072,7 +6161,9 @@ fn grid_card(
                 let path = path_move.clone();
                 let _ = app.update(cx, |app, cx| {
                     if app.rubber_band.is_some() && crate::drag_out::left_button_down() {
-                        if app.active_mut().selected.insert(path) {
+                        if app.rubber_band_additive {
+                            app.extend_rubber_selection(display_index, cx);
+                        } else if app.active_mut().selected.insert(path) {
                             cx.notify();
                         }
                     }
@@ -6084,6 +6175,7 @@ fn grid_card(
                 let _ = app.update(cx, |app, cx| {
                     app.pending_drag = None;
                     if app.rubber_band.take().is_some() {
+                        app.rubber_band_additive = false;
                         cx.notify();
                     }
                 });
@@ -6909,7 +7001,7 @@ impl ExplorerApp {
                         )
                         .child("从 YKExplorer 拖到资源管理器 / 桌面 / 其他程序：默认移动。")
                         .child("拖动开始时按住 Ctrl：改为复制。")
-                        .child("按住 Shift 拖动：强制框选，不拖出文件。"),
+                        .child("按住 Shift 拖动：累加框选，不拖出文件。"),
                 );
             div()
                 .id("general-settings-page")

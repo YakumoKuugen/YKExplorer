@@ -51,7 +51,7 @@ Shell 扩展（COM）管理：
 - **系统右键菜单子集**：在 YKExplorer 右键菜单中接入 Windows Shell 动词——打开方式、打印、以管理员身份运行、在此处打开 PowerShell、在 Windows 终端中打开、属性。
 - **注册表右键菜单管理**：枚举 `HKCU/HKLM\Software\Classes\*\shell`、`Directory\shell`、`Directory\Background\shell` 中已注册的动词（Git、VS Code、PowerShell 等），在 **设置 → 上下文菜单** 中逐项启用；启用项按文件/文件夹/空白处作用域出现在 YKExplorer 右键菜单，通过 `ShellExecuteExW` 调用。
 - **Shell 扩展（COM）**：枚举 `shellex\ContextMenuHandlers`（`*`、`Directory`、`Folder`、`Drive`、`Directory\Background`，HKLM/HKCU 及 Wow6432Node），显示名优先取扩展 DLL 的产品名——例如 **7-Zip**、**Beyond Compare**（注册名实际是 `CirrusShellEx`）。每个扩展在右键菜单中是一个**二级菜单**：鼠标悬停扩展名即展开，点击一级项不执行任何动作；子项由扩展的 `IContextMenu` 预构建（7-Zip 的“添加到压缩包 / CRC SHA”等会分别列出），点击具体子项才直接 `InvokeCommand`，不弹出额外的原生菜单。
-- **框选**：在文件列表空白处按住左键拖动即可框选；**按住 Shift 在文件上拖动**同样强制框选，会先清空原有选择，只保留从起点到终点框住的内容，不会把文件拖出去。拖动时鼠标经过的行/卡片会加入选择，松手结束。
+- **框选**：在文件列表空白处按住左键拖动即可框选；**按住 Shift 在文件上拖动**同样强制框选，并**累加到已有选择**（例如已选 4、5，再用 Shift 从 1 拖到 2，结果为 1、2、4、5），不会把文件拖出去。拖动时鼠标经过的行/卡片会加入选择，松手结束。
 - **替换系统资源管理器**：设置 → 常规中开启后，写入 `HKCU\Software\Classes\Folder|Directory|Drive\shell\open\command` 与对应的 `shell\explore\command`（`explore` 是独立的"新窗口打开"动词，部分启动器会用），并接管 `CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}`（显示名就是“File Explorer”）的 `opennewwindow`，因此文件夹双击、**Win+E** 和开始菜单“文件管理器”都会打开 YKExplorer。写入前备份原命令、值类型和 DelegateExecute，关闭时完整恢复；用无效的 `DelegateExecute` 覆盖 HKLM 委托，让 Shell 回退到 YKExplorer 命令。
 - **独立配置文件**：所有设置保存在 `%APPDATA%\YKExplorer\config.json`，与安装目录完全分离——覆盖安装 / 换目录 / 删掉程序都不会重置配置。旧版本写在 `settings.json` 或程序目录 `ykexplorer.settings.json` 的配置会在首次启动时自动迁移，并把旧文件改名为 `*.json.migrated` 留作备份。设置 → 常规 里显示该路径并提供「打开所在文件夹」。
 - **文件操作**：打开、复制、剪切、粘贴、重命名、新建文件夹/文件、回收站删除、永久删除（确认）、复制路径、在资源管理器中定位。
