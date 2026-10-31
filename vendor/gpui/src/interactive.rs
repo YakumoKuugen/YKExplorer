@@ -529,6 +529,11 @@ pub enum FileDropEvent {
     Submit {
         /// The position of the mouse relative to the window.
         position: Point<Pixels>,
+        /// Paths re-read from the data object at drop time, when the platform
+        /// supports it. Some drag sources (7-Zip and friends) only render the
+        /// real `CF_HDROP` payload after the mouse button is released, so the
+        /// list captured on `Entered` can be a placeholder.
+        paths: Option<ExternalPaths>,
     },
     /// The user has stopped dragging the files over the window.
     Exited,

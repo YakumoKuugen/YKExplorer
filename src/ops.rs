@@ -126,6 +126,156 @@ pub fn copy_into(paths: &[PathBuf], dest_dir: &Path) -> OpReport {
     report
 }
 
+/// Sources moved out of an archiver's drag-and-drop temp folder.
+pub struct StagedDrop {
+    /// Stable paths inside `staging_root`, ready for an asynchronous copy.
+    pub sources: Vec<PathBuf>,
+    /// Private folder the payload was moved into; remove it after copying.
+    pub staging_root: PathBuf,
+}
+
+/// True when `name` looks like the temp folder an archiver creates for
+/// drag-and-drop extraction: 7-Zip uses `7zE`+hex (drag out) / `7zO`+hex (open)
+/// and WinRAR uses `Rar$…`.
+fn is_archiver_temp_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if let Some(rest) = lower
+        .strip_prefix("7ze")
+        .or_else(|| lower.strip_prefix("7zo"))
+    {
+        return rest.len() >= 4 && rest.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    lower.starts_with("rar$")
+}
+
+fn normalized_dir(path: &Path) -> String {
+    path.to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase()
+}
+
+fn is_direct_child_of(path: &Path, parent: &Path) -> bool {
+    path.parent()
+        .is_some_and(|actual| normalized_dir(actual) == normalized_dir(parent))
+}
+
+fn is_archiver_temp_root_in(path: &Path, temp_root: &Path) -> bool {
+    is_direct_child_of(path, temp_root)
+        && path
+            .file_name()
+            .is_some_and(|name| is_archiver_temp_name(&name.to_string_lossy()))
+}
+
+/// True when the dragged item itself is an archiver's extraction folder. Such a
+/// folder is empty while the drag runs and is deleted right after it, so
+/// copying it only produces an empty `7zE…` folder in the destination.
+pub fn is_archiver_temp_root(path: &Path) -> bool {
+    is_archiver_temp_root_in(path, &std::env::temp_dir())
+}
+
+/// The archiver temp folder `path` lives in, if any.
+fn archiver_temp_root_in(path: &Path, temp_root: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .skip(1)
+        .find(|ancestor| is_archiver_temp_root_in(ancestor, temp_root))
+        .map(Path::to_path_buf)
+}
+
+/// True when at least one path is an archiver's temporary drag folder or lives
+/// inside one (for example a folder dragged straight out of an archive). Such a
+/// path disappears with the drag and must not be pinned to quick access.
+pub fn is_archiver_temp_payload(paths: &[PathBuf]) -> bool {
+    let temp_root = std::env::temp_dir();
+    paths.iter().any(|path| {
+        is_archiver_temp_root_in(path, &temp_root)
+            || archiver_temp_root_in(path, &temp_root).is_some()
+    })
+}
+
+fn unique_staging_dir(temp_root: &Path) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    temp_root.join(format!("YKExplorer-drop-{}-{stamp}", std::process::id()))
+}
+
+/// Take ownership of a drop that only lives inside an archiver's temp folder.
+///
+/// 7-Zip (and WinRAR, …) extract dragged items into `%TEMP%\7zE…` and delete
+/// that folder as soon as `IDropTarget::Drop` returns, which is before our
+/// background copy starts. Renaming the payload into our own staging folder
+/// inside `%TEMP%` is effectively instant, keeps the data alive and lets the
+/// copy run asynchronously as usual.
+///
+/// Returns `None` when the paths are regular files (copy them in place).
+pub fn stage_archiver_drop(paths: &[PathBuf]) -> Option<StagedDrop> {
+    let temp_root = std::env::temp_dir();
+    let staging_root = unique_staging_dir(&temp_root);
+    stage_archiver_drop_within(paths, &temp_root, staging_root)
+}
+
+fn stage_archiver_drop_within(
+    paths: &[PathBuf],
+    temp_root: &Path,
+    staging_root: PathBuf,
+) -> Option<StagedDrop> {
+    if paths.is_empty()
+        || !paths
+            .iter()
+            .all(|path| archiver_temp_root_in(path, temp_root).is_some())
+    {
+        log::debug!("stage_archiver_drop: not an archiver temp payload");
+        return None;
+    }
+    if let Err(error) = fs::create_dir_all(&staging_root) {
+        log::warn!(
+            "could not create staging folder {}: {error}",
+            staging_root.display()
+        );
+        return None;
+    }
+    let mut sources = Vec::with_capacity(paths.len());
+    for source in paths {
+        let Some(name) = source.file_name() else {
+            continue;
+        };
+        let target = unique_destination(&staging_root, &name.to_string_lossy());
+        // Same volume in the normal case, so this is a rename; fall back to a
+        // copy when the archiver's temp folder lives on another volume or the
+        // source is already being deleted.
+        let staged = match fs::rename(source, &target) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                log::debug!(
+                    "rename {} failed ({error}), falling back to a copy",
+                    source.display()
+                );
+                copy_entry(source, &target)
+            }
+        };
+        match staged {
+            Ok(()) => sources.push(target),
+            Err(error) => log::warn!("could not stage {}: {error}", source.display()),
+        }
+    }
+    if sources.is_empty() {
+        let _ = fs::remove_dir_all(&staging_root);
+        return None;
+    }
+    Some(StagedDrop {
+        sources,
+        staging_root,
+    })
+}
+
+/// Remove a staging folder created by [`stage_archiver_drop`].
+pub fn discard_staged_drop(root: &Path) {
+    if let Err(error) = fs::remove_dir_all(root) {
+        log::warn!("could not remove staged drop {}: {error}", root.display());
+    }
+}
+
 pub fn move_into(paths: &[PathBuf], dest_dir: &Path) -> OpReport {
     let mut report = OpReport::default();
     let dest_canon = dunce::canonicalize(dest_dir).ok();
@@ -715,5 +865,123 @@ fn build_handler_data(
             SHCreateDataObject(Some(folder_pidl), Some(&children), None::<&IDataObject>)
                 .map_err(|error| format!("无法创建文件数据对象：{error}"))?;
         Ok((folder_pidl, data, absolute_pidls))
+    }
+}
+
+#[cfg(test)]
+mod drag_drop_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A stand-in for `%TEMP%` inside the workspace: the real temp folder is not
+    /// writable for the test process on every machine.
+    fn scratch_temp_root() -> PathBuf {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-scratch")
+            .join(format!(
+                "ykexplorer-drop-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn detects_archiver_temp_folders() {
+        let root = scratch_temp_root();
+        let dir = root.join("7zE1A2B3C4D");
+        fs::create_dir(&dir).unwrap();
+        let file = dir.join("报告.txt");
+        fs::write(&file, b"payload").unwrap();
+
+        assert_eq!(
+            archiver_temp_root_in(&file, &root).as_deref(),
+            Some(dir.as_path())
+        );
+        assert!(is_archiver_temp_root_in(&dir, &root));
+        assert!(!is_archiver_temp_root_in(&file, &root));
+        assert!(archiver_temp_root_in(&dir.join("子目录").join("a.txt"), &root).is_some());
+
+        let plain = root.join("普通的临时目录");
+        fs::create_dir(&plain).unwrap();
+        fs::write(plain.join("a.txt"), b"x").unwrap();
+        assert!(!is_archiver_temp_root_in(&plain, &root));
+        assert!(archiver_temp_root_in(&plain.join("a.txt"), &root).is_none());
+
+        // A folder with an archiver-like name outside the temp root is not one.
+        let outside = root.join("elsewhere").join("7zE12345678").join("a.txt");
+        assert!(archiver_temp_root_in(&outside, &root).is_none());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stages_archiver_payload_before_the_source_disappears() {
+        let root = scratch_temp_root();
+        let dir = root.join("7zE0BADF00D");
+        fs::create_dir(&dir).unwrap();
+        let file = dir.join("数据.csv");
+        fs::write(&file, b"a,b\n1,2\n").unwrap();
+        let folder = dir.join("子目录");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("说明.txt"), b"hello").unwrap();
+        let staging_root = root.join("YKExplorer-drop-test");
+
+        let staged = stage_archiver_drop_within(
+            &[file.clone(), folder.clone()],
+            &root,
+            staging_root.clone(),
+        )
+        .expect("should stage");
+        assert_eq!(staged.sources.len(), 2);
+        assert!(!file.exists());
+        assert!(!folder.exists());
+
+        // The archiver deletes its temp folder right after the drop.
+        fs::remove_dir_all(&dir).unwrap();
+
+        let csv = staged
+            .sources
+            .iter()
+            .find(|path| path.extension().is_some_and(|ext| ext == "csv"))
+            .expect("csv staged");
+        assert_eq!(fs::read(csv).unwrap(), b"a,b\n1,2\n");
+        let nested = staged
+            .sources
+            .iter()
+            .find(|path| path.is_dir())
+            .expect("folder staged");
+        assert_eq!(fs::read(nested.join("说明.txt")).unwrap(), b"hello");
+
+        discard_staged_drop(&staged.staging_root);
+        assert!(!staging_root.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn leaves_regular_drops_untouched() {
+        let root = scratch_temp_root();
+        let dir = root.join("regular");
+        fs::create_dir(&dir).unwrap();
+        let file = dir.join("a.txt");
+        fs::write(&file, b"x").unwrap();
+
+        assert!(
+            stage_archiver_drop_within(
+                std::slice::from_ref(&file),
+                &root,
+                root.join("YKExplorer-drop-test"),
+            )
+            .is_none()
+        );
+        assert!(file.exists());
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

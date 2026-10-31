@@ -841,8 +841,10 @@ impl X11Client {
                     );
                     let position = state.xdnd_state.position;
                     drop(state);
-                    window
-                        .handle_input(PlatformInput::FileDrop(FileDropEvent::Submit { position }));
+                    window.handle_input(PlatformInput::FileDrop(FileDropEvent::Submit {
+                        position,
+                        paths: None,
+                    }));
                     self.0.borrow_mut().xdnd_state = Xdnd::default();
                 }
             }

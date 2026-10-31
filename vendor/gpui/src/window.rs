@@ -3644,9 +3644,17 @@ impl Window {
                         modifiers: Modifiers::default(),
                     })
                 }
-                FileDropEvent::Submit { position } => {
+                FileDropEvent::Submit { position, paths } => {
                     cx.activate(true);
                     self.mouse_position = position;
+                    // A platform may be able to re-read the data object once the
+                    // drag finished; use that list so lazy sources (archives
+                    // that extract on demand) drop the real files.
+                    if let Some(paths) = paths
+                        && let Some(drag) = cx.active_drag.as_mut()
+                    {
+                        drag.value = Arc::new(paths);
+                    }
                     PlatformInput::MouseUp(MouseUpEvent {
                         button: MouseButton::Left,
                         position,

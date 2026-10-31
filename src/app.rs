@@ -2453,13 +2453,69 @@ impl ExplorerApp {
         cx: &mut Context<Self>,
     ) {
         let destination = self.active().path.clone();
-        self.copy_external_paths(paths.paths().to_vec(), destination, cx);
+        self.drop_external_paths(paths.paths().to_vec(), destination, cx);
+    }
+
+    /// Copy paths dropped in from another application into `destination`.
+    ///
+    /// Archivers (7-Zip, WinRAR, …) do not hand out the archived files
+    /// directly: they extract them into a private `%TEMP%` folder and delete
+    /// that folder as soon as `IDropTarget::Drop` returns. Our copy runs on the
+    /// background executor, so by the time it starts the payload is gone and
+    /// only an empty `7zE…` folder would be created. Move such payloads into
+    /// our own staging folder first (a rename inside `%TEMP%`, effectively
+    /// instant) and copy from there.
+    fn drop_external_paths(
+        &mut self,
+        files: Vec<PathBuf>,
+        destination: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if files.is_empty() {
+            return;
+        }
+        log::info!(
+            "external drop: {} item(s) -> {}: {:?}",
+            files.len(),
+            destination.display(),
+            files
+        );
+        if let Some(root) = files
+            .iter()
+            .find(|path| ops::is_archiver_temp_root(path))
+        {
+            self.show_error(
+                "无法读取压缩包中的文件",
+                format!(
+                    "拖放来源只给出了压缩软件的临时文件夹：\n{}\n\n请确认压缩软件已完成解压后重试，或在压缩软件里先解压再复制。",
+                    root.display()
+                ),
+            );
+            cx.notify();
+            return;
+        }
+        match ops::stage_archiver_drop(&files) {
+            Some(staged) => {
+                log::info!(
+                    "moved archiver drop into staging folder {}",
+                    staged.staging_root.display()
+                );
+                self.copy_external_paths(
+                    staged.sources,
+                    destination,
+                    Some(staged.staging_root),
+                    cx,
+                )
+            }
+            None => self.copy_external_paths(files, destination, None, cx),
+        }
     }
 
     fn copy_external_paths(
         &mut self,
         files: Vec<PathBuf>,
         destination: PathBuf,
+        staging: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
         if files.is_empty() {
@@ -2470,10 +2526,21 @@ impl ExplorerApp {
         self.operation = Some(format!("正在复制 {count} 项到 {}…", destination.display()));
         cx.notify();
         let future = cx.background_executor().spawn(async move {
-            ops::copy_into(&files, &destination)
+            let report = ops::copy_into(&files, &destination);
+            // Drop the staged copy once it has been copied out; keep it when
+            // the copy failed so nothing that only existed in the archiver's
+            // temp folder is lost.
+            let kept = match staging {
+                Some(root) if report.ok() => {
+                    ops::discard_staged_drop(&root);
+                    None
+                }
+                other => other,
+            };
+            (report, kept)
         });
         cx.spawn(async move |this, cx| {
-            let report = future.await;
+            let (report, kept) = future.await;
             if !report.ok() {
                 log::warn!(
                     "copy into {} failed: {:?}",
@@ -2495,10 +2562,14 @@ impl ExplorerApp {
                     } else {
                         ""
                     };
+                    let kept_hint = kept
+                        .as_ref()
+                        .map(|root| format!("\n\n临时副本保留在：{}", root.display()))
+                        .unwrap_or_default();
                     this.show_error(
                         "复制失败",
                         format!(
-                            "目标：{}\n{}{hint}",
+                            "目标：{}\n{}{hint}{kept_hint}",
                             destination_for_log.display(),
                             report.errors.join("\n")
                         ),
@@ -4281,8 +4352,17 @@ impl ExplorerApp {
                 )
                 .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                     cx.stop_propagation();
-                    for path in paths.paths() {
-                        this.add_quick_place(path.clone(), cx);
+                    let items = paths.paths().to_vec();
+                    if ops::is_archiver_temp_payload(&items) {
+                        this.show_toast(
+                            "压缩包里的文件夹需要先解压才能固定",
+                            ToastKind::Info,
+                            cx,
+                        );
+                        return;
+                    }
+                    for path in items {
+                        this.add_quick_place(path, cx);
                     }
                 }))
                 .into_any_element(),
@@ -4383,13 +4463,20 @@ impl ExplorerApp {
                         cx.stop_propagation();
                         let items = paths.paths().to_vec();
                         // Folders dropped on the sidebar are pinned; files are
-                        // copied into the place under the pointer.
-                        if !items.is_empty() && items.iter().all(|path| path.is_dir()) {
+                        // copied into the place under the pointer. Folders that
+                        // only exist inside an archiver's temp folder are copied
+                        // instead of pinned, otherwise the pin would point at a
+                        // path that disappears with the drag.
+                        let volatile = ops::is_archiver_temp_payload(&items);
+                        if !volatile
+                            && !items.is_empty()
+                            && items.iter().all(|path| path.is_dir())
+                        {
                             for path in items {
                                 this.add_quick_place(path, cx);
                             }
                         } else {
-                            this.copy_external_paths(items, drop_path.clone(), cx);
+                            this.drop_external_paths(items, drop_path.clone(), cx);
                         }
                     }))
                     .child(
@@ -4490,7 +4577,7 @@ impl ExplorerApp {
                     }))
                     .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
                         cx.stop_propagation();
-                        this.copy_external_paths(paths.paths().to_vec(), drop_path.clone(), cx);
+                        this.drop_external_paths(paths.paths().to_vec(), drop_path.clone(), cx);
                     }))
                     .child(
                         div()
@@ -4561,8 +4648,17 @@ impl ExplorerApp {
                     .pb_2()
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                         cx.stop_propagation();
-                        for path in paths.paths() {
-                            this.add_quick_place(path.clone(), cx);
+                        let items = paths.paths().to_vec();
+                        if ops::is_archiver_temp_payload(&items) {
+                            this.show_toast(
+                                "压缩包里的文件夹需要先解压才能固定",
+                                ToastKind::Info,
+                                cx,
+                            );
+                            return;
+                        }
+                        for path in items {
+                            this.add_quick_place(path, cx);
                         }
                     }))
                     .children(rows),
@@ -7652,6 +7748,25 @@ impl ExplorerApp {
                 "icons/external.svg",
                 "在资源管理器中显示",
                 "Ctrl+Shift+E",
+                false,
+                cx,
+            ));
+            // A full list leaves no empty space to right-click, so creating
+            // items must also be reachable from a file/folder row.
+            items.push(menu_separator());
+            items.push(self.menu_item(
+                MenuCommand::NewFolder,
+                "icons/plus.svg",
+                "新建文件夹",
+                "Ctrl+Shift+N",
+                false,
+                cx,
+            ));
+            items.push(self.menu_item(
+                MenuCommand::NewFile,
+                "icons/file.svg",
+                "新建文件",
+                "Ctrl+Alt+N",
                 false,
                 cx,
             ));

@@ -48,13 +48,14 @@ Shell 扩展（COM）管理：
 - `DoDragDrop` 通过窗口子类在 **UI 线程** 执行，拖放期间保留源窗口鼠标捕获；私有 `WM_APP` 消息保证进入拖放时 GPUI 借用已释放
 - 本地 patch 了 gpui 的 `DragEnter`：原实现把 `HGLOBAL` 二次解引用后传给 `DragQueryFileW`，拖回自身窗口会崩在 `windows.storage.dll`
 - **外部文件拖入**：接收来自资源管理器的 `CF_HDROP`；拖入文件列表内容区会复制到当前文件夹；也可直接拖到侧栏驱动器或快速访问位置（例如拖到 `F:` 会复制到 F 盘根目录）。
+  - **支持从压缩软件（7-Zip / WinRAR 等）拖出**：这类程序在拖动过程中只提供自己的临时解压目录（`%TEMP%\7zE…`），鼠标松开后才解压并给出真实文件，`Drop` 一返回就删除临时目录。因此在 `Drop` 时重新读取 `CF_HDROP`，并在返回前把解压结果 rename 进本程序自己的暂存目录（同盘 rename，瞬时完成），随后照常异步复制——不会再只留下一个空的 `7zE…` 文件夹；真正耗时的解压与复制分别由压缩软件和后台任务完成。
 - **系统右键菜单子集**：在 YKExplorer 右键菜单中接入 Windows Shell 动词——打开方式、打印、以管理员身份运行、在此处打开 PowerShell、在 Windows 终端中打开、属性。
 - **注册表右键菜单管理**：枚举 `HKCU/HKLM\Software\Classes\*\shell`、`Directory\shell`、`Directory\Background\shell` 中已注册的动词（Git、VS Code、PowerShell 等），在 **设置 → 上下文菜单** 中逐项启用；启用项按文件/文件夹/空白处作用域出现在 YKExplorer 右键菜单，通过 `ShellExecuteExW` 调用。
 - **Shell 扩展（COM）**：枚举 `shellex\ContextMenuHandlers`（`*`、`Directory`、`Folder`、`Drive`、`Directory\Background`，HKLM/HKCU 及 Wow6432Node），显示名优先取扩展 DLL 的产品名——例如 **7-Zip**、**Beyond Compare**（注册名实际是 `CirrusShellEx`）。每个扩展在右键菜单中是一个**二级菜单**：鼠标悬停扩展名即展开，点击一级项不执行任何动作；子项由扩展的 `IContextMenu` 预构建（7-Zip 的“添加到压缩包 / CRC SHA”等会分别列出），点击具体子项才直接 `InvokeCommand`，不弹出额外的原生菜单。
 - **框选**：在文件列表空白处按住左键拖动即可框选；**按住 Shift 在文件上拖动**同样强制框选，并**累加到已有选择**（例如已选 4、5，再用 Shift 从 1 拖到 2，结果为 1、2、4、5），不会把文件拖出去。拖动时鼠标经过的行/卡片会加入选择，松手结束。
 - **替换系统资源管理器**：设置 → 常规中开启后，写入 `HKCU\Software\Classes\Folder|Directory|Drive\shell\open\command` 与对应的 `shell\explore\command`（`explore` 是独立的"新窗口打开"动词，部分启动器会用），并接管 `CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}`（显示名就是“File Explorer”）的 `opennewwindow`，因此文件夹双击、**Win+E** 和开始菜单“文件管理器”都会打开 YKExplorer。写入前备份原命令、值类型和 DelegateExecute，关闭时完整恢复；用无效的 `DelegateExecute` 覆盖 HKLM 委托，让 Shell 回退到 YKExplorer 命令。
 - **独立配置文件**：所有设置保存在 `%APPDATA%\YKExplorer\config.json`，与安装目录完全分离——覆盖安装 / 换目录 / 删掉程序都不会重置配置。旧版本写在 `settings.json` 或程序目录 `ykexplorer.settings.json` 的配置会在首次启动时自动迁移，并把旧文件改名为 `*.json.migrated` 留作备份。设置 → 常规 里显示该路径并提供「打开所在文件夹」。
-- **文件操作**：打开、复制、剪切、粘贴、重命名、新建文件夹/文件、回收站删除、永久删除（确认）、复制路径、在资源管理器中定位。
+- **文件操作**：打开、复制、剪切、粘贴、重命名、新建文件夹/文件、回收站删除、永久删除（确认）、复制路径、在资源管理器中定位。新建入口不只在列表空白处：右键任意文件/文件夹同样有「新建文件夹」「新建文件」，另可用 `Ctrl+Shift+N` / `Ctrl+Alt+N`（列表排满时也能新建）。
 - **可编辑快速访问**：侧栏「快速访问」支持把条目拖动——按住后出现一个**跟随光标的悬浮卡片**（图标 + 名称 + 状态提示）；放回原来那一行即取消，松开在任何其它位置（包括窗口外）即移除。把文件夹拖进侧栏则固定到快速访问；列表持久化到设置文件。设置 → 快速访问页可开关内置默认项，并提供「恢复默认」。
 - **悬停跟随动画**：鼠标在**文件列表、宫格、左侧快捷栏/驱动器**之间移动时，深色高亮（`#E4E7EF`）会像**从 UI 后方浮起**——从中心略内缩、近乎透明，用 200ms `ease-out-quint` 放大并上浮到整块，离开时反向缩回。高亮是绝对定位层（始终存在、仅切透明度），既不挤动文件名位置，也不会让 hover 事件抖动；文件列表已去掉行分隔线，选中态同样是圆角色块，与侧栏风格统一。
 - **打开文件动画**：双击或回车打开文件时，底部弹出「文件名 + 正在打开…」圆角提示，160ms 淡入并上移，620ms 后自动消失。

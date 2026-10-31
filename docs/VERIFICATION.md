@@ -7,6 +7,10 @@
 > 根因有两个：① gpui `DragEnter` 把 `HGLOBAL` 二次解引用后传给 `DragQueryFileW`，拖回自身窗口会崩在 `windows.storage.dll`（已本地 patch）；② 之前从被沙箱标记为 **Low 完整性** 的 `dist` 目录启动，UIPI 阻止 Low → Medium 的 OLE 拖放，Explorer 直接返回禁止光标。改为从普通目录以 Medium 完整性启动后验证成功。
 > 最终拖放方案：Shell `IShellItemArray/BHID_DataObject` 数据对象 + UI 线程窗口子类 + 保留鼠标捕获。
 
+> 2026-10-31 追加：修复「从 7-Zip 的压缩包窗口拖文件到本程序，只生成一个 `7zE…` 空文件夹、文件没有复制」。  
+> 根因在 7-Zip 的拖放协议：拖动期间 `IDataObject::GetData(CF_HDROP)` 只返回它自己的临时解压目录 `%TEMP%\7zE{HEX}`（`m_hGlobal_HDROP_Pre`），鼠标**松开后**才解压并切换到真实文件列表（`UsePreGlobal = false`），而 `DoDragDrop` 一返回就删除该临时目录。此前 gpui 只在 `DragEnter` 读一次 `CF_HDROP`，所以本程序拿到的是临时目录，异步复制开始时里面还是空的（或已被删除），于是目标处只留下一个空的 `7zE…` 文件夹。  
+> 修复：① `Drop` 时重新读取 `CF_HDROP`，拿到真实文件并触发 7-Zip 解压（`vendor/gpui` 的 `FileDropEvent::Submit` 新增 `paths`，`Window` 用它更新当前拖动数据）；② 在 `Drop` 返回前把 `%TEMP%\7zE…` 里的内容 rename 进本程序自己的 `YKExplorer-drop-*` 暂存目录（同盘 rename，瞬时；跨盘或源正在删除时回退为同步复制），后台复制完成后再清理暂存目录，失败则保留并在错误弹窗里给出路径。见 `ops::stage_archiver_drop` / `ExplorerApp::drop_external_paths`。
+
 界面截图：`docs/screenshot.png`（双栏）、`docs/screenshot-grid.png`（宫格）、`docs/screenshot-menu.png`（系统右键菜单）、`docs/screenshot-settings.png`（上下文菜单统一设置页）、`docs/screenshot-shellex-settings.png`（Shell 扩展设置页旧版）、`docs/screenshot-shellex-menu.png`（7-Zip / Beyond Compare 作为二级菜单）、`docs/screenshot-shellex-submenu.png`（7-Zip 二级菜单）。
 
 ## 1. 构建
@@ -23,8 +27,8 @@ dist/YKExplorer.exe
 
 ```text
 cargo test
-running 20 tests
-19 passed; 0 failed; 1 ignored
+running 24 tests
+23 passed; 0 failed; 1 ignored
 ```
 
 覆盖：
@@ -34,6 +38,7 @@ running 20 tests
 - CF_HDROP UTF-16 路径、`DROPFILES` 头、Preferred DropEffect
 - 自定义 `IDataObject` 的 COM 接口级读取
 - 自研 `IDataObject` 的 CF_HDROP 读取与跨进程编组（新增）
+- 压缩软件临时目录（`7zE{HEX}` / `Rar$…`）识别、拖放内容暂存后归档删除仍可读、普通拖入不被搬动
 - 设置默认值、Shell 菜单开关、注册表菜单启用项、JSON 往返
 - 注册表菜单作用域路径/稳定 ID、枚举不 panic
 - 剪贴板往返测试默认 ignored（无交互桌面时 `OpenClipboard` 返回 `0x80070005`）
@@ -91,9 +96,11 @@ running 20 tests
 | Shell 扩展设置布局 | ✅ 设置页显示程序名、作用域与 hive；7-Zip/Beyond Compare 开关可见（截图 `screenshot-shellex-settings.png`） |
 | 设置页图标 | ✅ 新生成 info/print/shield/terminal 图标已加入内嵌资源 |
 | 拖入目标 | ✅ 内容区绑定当前目录；驱动器行/快速访问行绑定各自目录（非当前目录），代码层接线完成 |
+| 新建入口 | ✅ 列表排满时无空白可点：文件/文件夹右键菜单底部新增「新建文件夹」「新建文件」（带快捷键提示），点击后分别打开对应编辑框（调试 IPC `context-menu` + 截图确认菜单项；点击「新建文件」行得到 `editor=NewFile`）；空白处右键与 `Ctrl+Shift+N` / `Ctrl+Alt+N` 保持不变 |
 | 标题栏 | ✅ 用户实测通过；后台光标跟随线程 + `SetWindowPos` |
 | 拖出启动 | ✅ 物理光标/左键 watcher + 窗口子类（UI 线程执行 `DoDragDrop`）；日志确认 `window subclass installed` |
 | 跨程序拖放 | ✅ 用户实测成功（Explorer → YKExplorer 与 YKExplorer → Explorer 均正常），前提是进程为 Medium 完整性 |
+| 从 7-Zip 拖出文件 | ✅ 同一脚本对比：修复前 `dist` 构建只生成空文件夹 `7zE8CBF4E6F`；修复后目标目录得到 `报告.txt`（66 B，内容一致），`YKExplorer-drop-*` 暂存与 7-Zip 的 `7zE…` 临时目录均被清理；日志确认 `DragEnter` 拿到 `...\temp\7zE…`、`Drop` 拿到 `...\temp\7zE…\报告.txt` |
 | 拖回自身窗口崩溃 | ✅ 修复 gpui `DragQueryFileW` 传参后不再崩溃 |
 | 拖拽首选效果 | ⚠ 标准 Shell 对象不暴露自定义 Preferred DropEffect；允许 MOVE|COPY、Shift 只允许 COPY，最终由目标决定 |
 | 注册表菜单调用 | ✅ 代码走 `ShellExecuteExW` 动词；DelegateExecute 类动词可能失败并提示 |
@@ -108,6 +115,31 @@ running 20 tests
 - 当前方案：`drag_host` 用 `SetWindowLongPtrW(GWLP_WNDPROC)` 子类化窗口，UI 线程收到 `WM_APP+0x51` 后执行 `DoDragDrop`，此时 GPUI 借用已释放、线程也正确。
 - 禁止光标最终定位为 **UIPI**：调试实例从沙箱标记目录启动，进程为 Low 完整性；Explorer 为 Medium，Low→Medium 的 OLE 拖放被系统拦截，目标不会收到数据对象。改为从普通目录启动（Medium）后用户实测成功。
 - 同时修复了 gpui `DragEnter` 的 `HDROP` 二次解引用 bug（`vendor/gpui` + `[patch.crates-io]`），否则使用 Shell 数据对象拖回自身窗口会崩在 `windows.storage.dll`。
+
+### 7-Zip 拖出的临时文件夹
+
+复现与修复用的同一套脚本（`tools/e2e_7zip_drag.ps1`，合成鼠标拖拽，7zFM 窗口固定在 (0,0)，条目点在 (40,168)，落点在本程序列表区）：
+
+```text
+dist/YKExplorer.exe（修复前）
+  dest\7zE8CBF4E6F      <- 只有一个空文件夹，文件没有复制
+  temp\                <- 7-Zip 的临时目录已被自己删掉
+
+target/debug/YKExplorer.exe（修复后）
+  dest\报告.txt  66 B  <- 内容与压缩包内一致
+  temp\                <- 暂存目录与 7-Zip 临时目录都已清理
+```
+
+日志（`RUST_LOG=debug`）显示两次 `CF_HDROP` 的内容不同，这正是问题所在：
+
+```text
+DragEnter: ["...\temp\7zE4D7CC1FA"]                 <- 占位：7-Zip 的临时解压目录
+Drop:      ["...\temp\7zE4D7CC1FA\报告.txt"]         <- 松手后才是真实文件（同时触发解压）
+```
+
+对应 7-Zip 源码 `CPP/7zip/UI/FileManager/PanelDrag.cpp`：`CDataObject::GetData` 在 `UsePreGlobal` 为真时返回 `m_hGlobal_HDROP_Pre`（只有 `dirPrefix`），`CDropSource::QueryContinueDrag` 在检测到左键松开后才把 `UsePreGlobal` 置为 false 并设置 `NeedCall_Copy`；解压发生在下一次 `GetData` 里，而 `OnDrag` 结束（即 `DoDragDrop` 返回）就析构 `CTempDir` 删除临时目录。
+
+因此 `Drop` 必须"读一次、搬一次"：重新读 `CF_HDROP` 拿到真实路径，并在返回前把内容 rename 进 `%TEMP%\YKExplorer-drop-<pid>-<stamp>`；否则后续的异步复制一定晚于 7-Zip 的清理。暂存目录与 7-Zip 处在同一个卷（都在 `%TEMP%`），rename 不复制数据，`Drop` 里多出来的开销只是几次改名；真正的耗时仍是 7-Zip 的解压（发生在 `Drop` 内的 `GetData`，解压完成前界面不刷新）和随后的后台复制。
 
 ## 4. F 盘“拒绝访问”的定位
 

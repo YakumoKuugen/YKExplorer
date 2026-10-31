@@ -2403,7 +2403,10 @@ extern "C" fn perform_drag_operation(this: &Object, _: Sel, dragging_info: id) -
     let position = drag_event_position(&window_state, dragging_info);
     send_new_event(
         &window_state,
-        PlatformInput::FileDrop(FileDropEvent::Submit { position }),
+        PlatformInput::FileDrop(FileDropEvent::Submit {
+            position,
+            paths: None,
+        }),
     )
     .to_objc()
 }

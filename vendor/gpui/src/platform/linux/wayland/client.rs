@@ -2003,6 +2003,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
 
                 let input = PlatformInput::FileDrop(FileDropEvent::Submit {
                     position: state.drag.position,
+                    paths: None,
                 });
                 drop(state);
                 drag_window.handle_input(input);

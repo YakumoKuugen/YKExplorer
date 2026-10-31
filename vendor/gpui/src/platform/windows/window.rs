@@ -865,6 +865,49 @@ impl PlatformWindow for WindowsWindow {
 #[implement(IDropTarget)]
 struct WindowsDragDropHandler(pub Rc<WindowsWindowInner>);
 
+/// The `CF_HDROP` variant every drop handler asks for.
+fn hdrop_format() -> FORMATETC {
+    FORMATETC {
+        cfFormat: CF_HDROP.0,
+        ptd: std::ptr::null_mut(),
+        dwAspect: DVASPECT_CONTENT.0,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as _,
+    }
+}
+
+/// Read the `CF_HDROP` payload out of an OLE data object.
+///
+/// The global handle *is* the `HDROP` the shell expects: dereferencing it and
+/// passing the pointer to `DragQueryFileW` reads the `DROPFILES` header as a
+/// pointer and crashes inside `windows.storage.dll` for shell data objects.
+fn hdrop_paths(data_object: &IDataObject) -> Option<ExternalPaths> {
+    unsafe {
+        let format = hdrop_format();
+        if data_object.QueryGetData(&format as _) != S_OK {
+            return None;
+        }
+        let mut medium = data_object.GetData(&format as _).log_err()?;
+        if medium.u.hGlobal.is_invalid() {
+            return None;
+        }
+        let hdrop = HDROP(medium.u.hGlobal.0);
+        let mut paths = SmallVec::<[PathBuf; 2]>::new();
+        with_file_names(hdrop, |file_name| {
+            if let Some(path) = PathBuf::from_str(&file_name).log_err() {
+                paths.push(path);
+            }
+        });
+        ReleaseStgMedium(&mut medium);
+        log::debug!("CF_HDROP payload: {paths:?}");
+        if paths.is_empty() {
+            None
+        } else {
+            Some(ExternalPaths(paths))
+        }
+    }
+}
+
 impl WindowsDragDropHandler {
     fn handle_drag_drop(&self, input: PlatformInput) {
         let mut lock = self.0.state.borrow_mut();
@@ -887,33 +930,12 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     ) -> windows::core::Result<()> {
         unsafe {
             let idata_obj = pdataobj.ok()?;
-            let config = FORMATETC {
-                cfFormat: CF_HDROP.0,
-                ptd: std::ptr::null_mut() as _,
-                dwAspect: DVASPECT_CONTENT.0,
-                lindex: -1,
-                tymed: TYMED_HGLOBAL.0 as _,
-            };
             let cursor_position = POINT { x: pt.x, y: pt.y };
-            if idata_obj.QueryGetData(&config as _) == S_OK {
+            if idata_obj.QueryGetData(&hdrop_format() as _) == S_OK {
                 *pdweffect = DROPEFFECT_COPY;
-                let Some(mut idata) = idata_obj.GetData(&config as _).log_err() else {
+                let Some(paths) = hdrop_paths(&idata_obj) else {
                     return Ok(());
                 };
-                if idata.u.hGlobal.is_invalid() {
-                    return Ok(());
-                }
-                // The HGLOBAL itself is the HDROP here; dereferencing it reads
-                // the DROPFILES header as a pointer and crashes inside
-                // DragQueryFileW for shell data objects.
-                let hdrop = HDROP(idata.u.hGlobal.0);
-                let mut paths = SmallVec::<[PathBuf; 2]>::new();
-                with_file_names(hdrop, |file_name| {
-                    if let Some(path) = PathBuf::from_str(&file_name).log_err() {
-                        paths.push(path);
-                    }
-                });
-                ReleaseStgMedium(&mut idata);
                 let mut cursor_position = cursor_position;
                 ScreenToClient(self.0.hwnd, &mut cursor_position)
                     .ok()
@@ -925,7 +947,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                         cursor_position.y as f32,
                         scale_factor,
                     ),
-                    paths: ExternalPaths(paths),
+                    paths,
                 });
                 self.handle_drag_drop(input);
             } else {
@@ -998,6 +1020,13 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                 .ok()
                 .log_err();
         }
+        // Re-read the paths here instead of reusing the list captured on
+        // `DragEnter`: sources such as 7-Zip report a placeholder (their temp
+        // extraction folder) while the drag is still in progress and only
+        // render/extract the real files once the button is released. Reading
+        // now is also what makes those sources materialise the files before
+        // they delete their temp folder.
+        let paths = hdrop_paths(&idata_obj);
         let scale_factor = self.0.state.borrow().scale_factor;
         let input = PlatformInput::FileDrop(FileDropEvent::Submit {
             position: logical_point(
@@ -1005,6 +1034,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                 cursor_position.y as f32,
                 scale_factor,
             ),
+            paths,
         });
         self.handle_drag_drop(input);
 
