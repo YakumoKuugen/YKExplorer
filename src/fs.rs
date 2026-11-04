@@ -114,6 +114,12 @@ pub struct FileEntry {
     pub extension: String,
     pub kind: FileKind,
     pub type_label: String,
+    /// Pre-formatted display strings. Formatting dates and sizes during every
+    /// frame is surprisingly expensive (chrono conversions per visible row);
+    /// these are computed once when the directory is read.
+    pub size_label: String,
+    pub modified_label: String,
+    pub modified_relative: String,
 }
 
 impl FileEntry {
@@ -136,6 +142,8 @@ impl FileEntry {
             .unwrap_or_default();
         let kind = FileKind::from_entry(is_dir, &extension);
         let type_label = kind.label(&extension);
+        let size = if is_dir { 0 } else { meta.len() };
+        let modified = meta.modified().ok();
 
         #[cfg(windows)]
         let is_hidden = {
@@ -152,29 +160,62 @@ impl FileEntry {
             is_dir,
             is_hidden,
             is_symlink,
-            size: if is_dir { 0 } else { meta.len() },
-            modified: meta.modified().ok(),
+            size,
+            modified,
             created: meta.created().ok(),
             accessed: meta.accessed().ok(),
             extension,
             kind,
             type_label,
+            size_label: if is_dir {
+                "—".to_string()
+            } else {
+                format_size(size)
+            },
+            modified_label: format_datetime(modified),
+            modified_relative: format_relative(modified),
         })
     }
 }
 
 pub fn read_directory(path: &Path) -> Result<Vec<FileEntry>, String> {
     let read = std::fs::read_dir(path).map_err(|err| friendly_io_error(err, path))?;
-    let mut entries = Vec::new();
-    for entry in read {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        if let Some(item) = FileEntry::read(entry.path()) {
-            entries.push(item);
-        }
+    // Metadata is the expensive part of listing a folder. Large folders are
+    // split across a few threads; sorting happens later anyway, so the order
+    // in which the chunks finish does not matter.
+    let mut paths = Vec::new();
+    for entry in read.flatten() {
+        paths.push(entry.path());
     }
+    if paths.len() < 512 {
+        return Ok(paths.into_iter().filter_map(FileEntry::read).collect());
+    }
+
+    let workers = std::thread::available_parallelism()
+        .map(|count| count.get().clamp(2, 4))
+        .unwrap_or(2)
+        .min(paths.len());
+    let chunk_size = paths.len().div_ceil(workers);
+    let mut entries = Vec::with_capacity(paths.len());
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = paths
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|path| FileEntry::read(path.clone()))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for handle in handles {
+            match handle.join() {
+                Ok(items) => entries.extend(items),
+                Err(_) => log::warn!("directory worker panicked while reading metadata"),
+            }
+        }
+    });
     Ok(entries)
 }
 
@@ -217,10 +258,7 @@ pub fn compare_entries(a: &FileEntry, b: &FileEntry, key: SortKey, ascending: bo
     }
     let ordering = match key {
         SortKey::Name => natural_cmp(&a.name, &b.name),
-        SortKey::Type => a
-            .type_label
-            .to_lowercase()
-            .cmp(&b.type_label.to_lowercase())
+        SortKey::Type => cmp_ignore_case(&a.type_label, &b.type_label)
             .then_with(|| natural_cmp(&a.name, &b.name)),
         SortKey::Modified => a
             .modified
@@ -234,6 +272,88 @@ pub fn compare_entries(a: &FileEntry, b: &FileEntry, key: SortKey, ascending: bo
     if ascending { ordering } else { ordering.reverse() }
 }
 
+/// A query prepared once and reused for every entry. `visible_indices` used to
+/// lowercase the query (and each file name) for every entry on every keystroke.
+pub struct FilterMatcher {
+    query: String,
+}
+
+impl FilterMatcher {
+    pub fn new(query: &str) -> Self {
+        Self {
+            query: query.trim().to_lowercase(),
+        }
+    }
+
+    pub fn matches(&self, entry: &FileEntry) -> bool {
+        if self.query.is_empty() {
+            return true;
+        }
+        if self.query.contains('*') || self.query.contains('?') {
+            return wildcard_match(&self.query, &entry.name.to_lowercase());
+        }
+        contains_ignore_case(&entry.name, &self.query)
+            || contains_ignore_case(&entry.type_label, &self.query)
+    }
+}
+
+fn lower_char(character: char) -> char {
+    if character.is_ascii() {
+        character.to_ascii_lowercase()
+    } else {
+        character.to_lowercase().next().unwrap_or(character)
+    }
+}
+
+fn cmp_ignore_case(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut left = a.chars();
+    let mut right = b.chars();
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(a), Some(b)) => {
+                let ordering = lower_char(a).cmp(&lower_char(b));
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
+            }
+        }
+    }
+}
+
+/// Case-insensitive substring test without allocating a lowercase copy of the
+/// file name. ASCII fast path covers the overwhelming majority of queries.
+fn contains_ignore_case(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    if haystack.is_ascii() && needle_lower.is_ascii() {
+        let needle = needle_lower.as_bytes();
+        return haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle));
+    }
+    'outer: for (start, _) in haystack.char_indices() {
+        let mut needle = needle_lower.chars();
+        let mut text = haystack[start..].chars();
+        loop {
+            match (text.next(), needle.next()) {
+                (Some(text), Some(needle)) => {
+                    if lower_char(text) != needle {
+                        continue 'outer;
+                    }
+                }
+                (_, None) => return true,
+                (None, Some(_)) => return false,
+            }
+        }
+    }
+    false
+}
+
 /// Folders still come first, but the returned indices preserve the original
 /// entries array so the UI can avoid cloning every FileEntry on each frame.
 pub fn visible_indices(
@@ -243,10 +363,11 @@ pub fn visible_indices(
     filter: &str,
     show_hidden: bool,
 ) -> Vec<usize> {
+    let matcher = FilterMatcher::new(filter);
     let mut indices: Vec<usize> = entries
         .iter()
         .enumerate()
-        .filter(|(_, entry)| (show_hidden || !entry.is_hidden) && matches_filter(entry, filter))
+        .filter(|(_, entry)| (show_hidden || !entry.is_hidden) && matcher.matches(entry))
         .map(|(index, _)| index)
         .collect();
     indices.sort_by(|&a, &b| compare_entries(&entries[a], &entries[b], key, ascending));
@@ -286,8 +407,8 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
                     }
                     continue;
                 }
-                let a_lower = ac.to_lowercase().next().unwrap_or(ac);
-                let b_lower = bc.to_lowercase().next().unwrap_or(bc);
+                let a_lower = lower_char(ac);
+                let b_lower = lower_char(bc);
                 let ord = a_lower.cmp(&b_lower);
                 if ord != std::cmp::Ordering::Equal {
                     return ord;
@@ -320,6 +441,7 @@ pub fn search_directory(
     if query.trim().is_empty() {
         return (results, false);
     }
+    let matcher = FilterMatcher::new(query);
     let mut pending = std::collections::VecDeque::new();
     pending.push_back(root.to_path_buf());
     while let Some(directory) = pending.pop_front() {
@@ -336,7 +458,7 @@ pub fn search_directory(
             if entry.is_dir && !entry.is_symlink {
                 pending.push_back(entry.path.clone());
             }
-            if matches_filter(&entry, query) {
+            if matcher.matches(&entry) {
                 results.push(entry);
                 if results.len() >= limit {
                     return (results, true);
@@ -345,19 +467,6 @@ pub fn search_directory(
         }
     }
     (results, false)
-}
-
-pub fn matches_filter(entry: &FileEntry, query: &str) -> bool {
-    let query = query.trim();
-    if query.is_empty() {
-        return true;
-    }
-    let query = query.to_lowercase();
-    let name = entry.name.to_lowercase();
-    if query.contains('*') || query.contains('?') {
-        return wildcard_match(&query, &name);
-    }
-    name.contains(&query) || entry.type_label.to_lowercase().contains(&query)
 }
 
 fn wildcard_match(pattern: &str, text: &str) -> bool {
@@ -579,6 +688,23 @@ fn utf16z_to_string(buf: &[u16]) -> String {
     String::from_utf16_lossy(&buf[..len])
 }
 
+/// Drive enumeration costs several shell calls per volume. Besides the startup
+/// window, every new explorer window asks for the same list, so cache it for a
+/// few seconds (an explicit refresh still forces a fresh scan).
+pub fn drives_cached() -> Vec<DriveInfo> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<(std::time::Instant, Vec<DriveInfo>)>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        std::sync::Mutex::new((std::time::Instant::now(), drives()))
+    });
+    let mut guard = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.0.elapsed() > Duration::from_secs(5) {
+        guard.1 = drives();
+        guard.0 = std::time::Instant::now();
+    }
+    guard.1.clone()
+}
+
 /// Build a quick-access entry for an arbitrary path, reusing the built-in
 /// label/icon when it is one of the defaults.
 pub fn quick_place_for(path: &Path) -> QuickPlace {
@@ -768,6 +894,9 @@ mod visible_tests {
             extension: ext.to_string(),
             kind: FileKind::from_entry(is_dir, ext),
             type_label: FileKind::from_entry(is_dir, ext).label(ext),
+            size_label: if is_dir { "—".into() } else { "0 B".into() },
+            modified_label: "—".into(),
+            modified_relative: "—".into(),
         }
     }
 
@@ -789,5 +918,23 @@ mod visible_tests {
         assert_eq!(entries[filtered[0]].name, "b.txt");
         let hidden = visible_indices(&entries, SortKey::Name, true, "", true);
         assert_eq!(hidden.len(), 4);
+    }
+
+    #[test]
+    fn filter_is_case_insensitive_and_supports_wildcards() {
+        let file = entry("Quarterly Report.TXT", false, false, "txt");
+        let matches = |query: &str| FilterMatcher::new(query).matches(&file);
+        assert!(matches("report"));
+        assert!(matches("REPORT"));
+        assert!(matches("*.txt"));
+        assert!(matches("文本文档"));
+        assert!(!matches("missing"));
+    }
+
+    #[test]
+    fn entry_display_labels_are_precomputed() {
+        let file = entry("a.txt", false, false, "txt");
+        assert_eq!(file.size_label, "0 B");
+        assert_eq!(file.modified_label, "—");
     }
 }

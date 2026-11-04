@@ -11,7 +11,7 @@
 > 根因在 7-Zip 的拖放协议：拖动期间 `IDataObject::GetData(CF_HDROP)` 只返回它自己的临时解压目录 `%TEMP%\7zE{HEX}`（`m_hGlobal_HDROP_Pre`），鼠标**松开后**才解压并切换到真实文件列表（`UsePreGlobal = false`），而 `DoDragDrop` 一返回就删除该临时目录。此前 gpui 只在 `DragEnter` 读一次 `CF_HDROP`，所以本程序拿到的是临时目录，异步复制开始时里面还是空的（或已被删除），于是目标处只留下一个空的 `7zE…` 文件夹。  
 > 修复：① `Drop` 时重新读取 `CF_HDROP`，拿到真实文件并触发 7-Zip 解压（`vendor/gpui` 的 `FileDropEvent::Submit` 新增 `paths`，`Window` 用它更新当前拖动数据）；② 在 `Drop` 返回前把 `%TEMP%\7zE…` 里的内容 rename 进本程序自己的 `YKExplorer-drop-*` 暂存目录（同盘 rename，瞬时；跨盘或源正在删除时回退为同步复制），后台复制完成后再清理暂存目录，失败则保留并在错误弹窗里给出路径。见 `ops::stage_archiver_drop` / `ExplorerApp::drop_external_paths`。
 
-界面截图：`docs/screenshot.png`（双栏）、`docs/screenshot-grid.png`（宫格）、`docs/screenshot-menu.png`（系统右键菜单）、`docs/screenshot-settings.png`（上下文菜单统一设置页）、`docs/screenshot-shellex-settings.png`（Shell 扩展设置页旧版）、`docs/screenshot-shellex-menu.png`（7-Zip / Beyond Compare 作为二级菜单）、`docs/screenshot-shellex-submenu.png`（7-Zip 二级菜单）。
+界面截图：`docs/screenshot.png`（双栏）、`docs/screenshot-grid.png`（宫格）、`docs/screenshot-menu.png`（系统右键菜单）、`docs/screenshot-settings.png`（上下文菜单统一设置页）、`docs/screenshot-shellex-settings.png`（Shell 扩展设置页旧版）、`docs/screenshot-shellex-menu.png`（7-Zip / Beyond Compare 作为二级菜单）、`docs/screenshot-shellex-submenu.png`（7-Zip 二级菜单）、`docs/screenshot-quicklook.png`（空格快速预览）。
 
 ## 1. 构建
 
@@ -27,13 +27,14 @@ dist/YKExplorer.exe
 
 ```text
 cargo test
-running 24 tests
-23 passed; 0 failed; 1 ignored
+running 30 tests
+29 passed; 0 failed; 1 ignored
 ```
 
 覆盖：
 
 - 文件大小/日期格式化、通配符筛选、文件夹优先、隐藏项过滤
+- 无分配忽略大小写筛选（`FilterMatcher`）与预格式化显示字段
 - 复制/移动、冲突自动改名、Windows 非法文件名、可执行扩展名判定
 - CF_HDROP UTF-16 路径、`DROPFILES` 头、Preferred DropEffect
 - 自定义 `IDataObject` 的 COM 接口级读取
@@ -140,6 +141,50 @@ Drop:      ["...\temp\7zE4D7CC1FA\报告.txt"]         <- 松手后才是真实�
 对应 7-Zip 源码 `CPP/7zip/UI/FileManager/PanelDrag.cpp`：`CDataObject::GetData` 在 `UsePreGlobal` 为真时返回 `m_hGlobal_HDROP_Pre`（只有 `dirPrefix`），`CDropSource::QueryContinueDrag` 在检测到左键松开后才把 `UsePreGlobal` 置为 false 并设置 `NeedCall_Copy`；解压发生在下一次 `GetData` 里，而 `OnDrag` 结束（即 `DoDragDrop` 返回）就析构 `CTempDir` 删除临时目录。
 
 因此 `Drop` 必须"读一次、搬一次"：重新读 `CF_HDROP` 拿到真实路径，并在返回前把内容 rename 进 `%TEMP%\YKExplorer-drop-<pid>-<stamp>`；否则后续的异步复制一定晚于 7-Zip 的清理。暂存目录与 7-Zip 处在同一个卷（都在 `%TEMP%`），rename 不复制数据，`Drop` 里多出来的开销只是几次改名；真正的耗时仍是 7-Zip 的解压（发生在 `Drop` 内的 `GetData`，解压完成前界面不刷新）和随后的后台复制。
+
+### 单进程多窗口、空格预览与性能（2026-11-04）
+
+```text
+state                     -> window_count=1
+new-window                -> ok new-window D:\Project\YKExplorer\demo (total=2)
+state                     -> window_count=2
+quick-look（中文文件夹）    -> open=true, payload=folder
+quick-look（中文说明.txt）  -> payload=text
+```
+
+- 两个窗口由同一个进程承载，枚举到两个可见 HWND；`PrintWindow` 分别截图成功。
+- 空格预览覆盖层：文件夹列出「归档」；`中文说明.txt` 显示 3 行中文文本；`docs/screenshot-quicklook.png`。
+- 关闭两个窗口后进程退出码 0，无 panic；最后一个窗口关闭时走 `on_window_should_close`。
+- 二次启动（模拟双击文件夹/命令行带路径）：已有实例 `window_count=1`、进程数 1；启动第二个 `YKExplorer.exe "demo\子目录"` 后**进程数仍为 1**、`window_count=2`，主实例日志收到 `single-instance launch request: "...\子目录"`，第二个进程 `exit=0`。
+- 无参数二次启动（模拟点击图标）：同样只保留一个进程，已有实例新开窗口，日志收到空请求 `single-instance launch request: ""`。
+- release 构建（`dist\\YKExplorer.exe`）复验：第二次带路径启动 134ms 退出、进程数保持 1，枚举到 2 个窗口标题；无参数启动 185ms 退出后变为 3 个窗口，仍只有 1 个进程。
+
+修复记录：最初新窗口创建时在 `next_bounds` 里用 `AnyWindowHandle::update` 读取当前窗口几何，而调用点本身正在更新同一个 `ExplorerApp`，GPUI 在 `entity_map.rs` 报 `cannot update ... while it is already being updated` 并 abort。现改为「持久化几何 + 进程内层叠计数」，不再跨窗口 lease 根 View。
+
+本轮调试实例所在的文件沙箱拒绝写入 `%APPDATA%\YKExplorer\window.json`（os error 5），因此关闭时无法落盘；手动预置 `{"x":80,"y":80,"width":1200,"height":800}` 后启动，`GetWindowRect` 返回外框 `1216x809`（客户区 1200×800），说明读取/恢复逻辑生效。代码又增加了 `%LOCALAPPDATA%` 与程序目录回退；本轮关闭窗口时确实退到 `target\debug\ykexplorer-window.json` 并成功写入，日志为 `window geometry saved to ...`。正常桌面启动时应由用户复验 `%APPDATA%` 自动保存。构建与测试：`cargo test` 29 passed / 1 ignored。
+
+#### 注册表写入“拒绝访问（5）”定位（2026-11-04）
+
+现象：`dist\YKExplorer.exe` 打开「设置默认打开方式」时报
+`无法写入注册表 Software\YKExplorer\ExplorerBackup\Folder：5`。
+
+排查：
+
+```text
+icacls D:\Project\YKExplorer\dist
+  ... Mandatory Label\Low Mandatory Level:(I)(OI)(CI)(NW)
+icacls D:\Project\YKExplorer\dist\YKExplorer.exe
+  ... Mandatory Label\Low Mandatory Level:(I)(NW)
+```
+
+`dist` 从工程根目录继承了 **Low Mandatory Level**，程序随之以低完整性运行；Windows 的强制完整性控制禁止低完整性进程写入 Medium 的 HKCU，因此 `RegCreateKeyExW` 返回 5。这不是注册表代码路径的权限计算错误。
+
+处理与验证：
+
+- 将工程根与 `dist` 调整为普通完整性（重建 `dist` 目录后新文件不再带 Low 标签），`dist\YKExplorer.exe` 当前 `icacls` 无 Low 标签。
+- 把同一份 Medium 完整性调试副本放到 `%TEMP%` 运行，通过 debug IPC 执行 `explorer enable` → `ok explorer enabled`，`explorer status` 变为 `enabled=true marker=true`；随后 `explorer disable` 完整恢复为 `false`，证明写入/恢复逻辑本身正常。
+- 新增 `registry_write_error()`：错误 5 时直接提示“低完整性目录/沙箱”与“复制到普通目录”的处理方式，不再只显示原始错误码。
+- 新增根目录 `build.ps1`：构建并复制到 `dist` 后检查/尝试修正 Low 标签，仍为 Low 时给出 warning。
 
 ## 4. F 盘“拒绝访问”的定位
 

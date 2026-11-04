@@ -562,6 +562,17 @@ pub fn run_as_admin(path: &Path) -> Result<(), String> {
     shell_verb(path, "runas")
 }
 
+pub fn open_cmd(path: &Path) -> Result<(), String> {
+    if !path.is_dir() {
+        return Err("必须选择一个文件夹".into());
+    }
+    Command::new("cmd.exe")
+        .current_dir(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法启动命令提示符：{error}"))
+}
+
 pub fn open_powershell(path: &Path) -> Result<(), String> {
     if !path.is_dir() {
         return Err("必须选择一个文件夹".into());

@@ -131,6 +131,33 @@
 - 中文输入法的候选框位置通过 GPUI `bounds_for_range` 返回光标矩形。
 - 附中文测试目录与回归截图。
 
+### 3.7 单进程多窗口
+
+- 每个窗口的根 View 都是独立的 `ExplorerApp`，拥有自己的 `tabs`、历史、筛选、输入焦点；配置从同一个 `config.json` 读取。
+- `window::open()` 封装 `App::open_window`：安装拖放窗口子类、创建根 View、注册关闭回调、按需启动 debug IPC（仅首个窗口）。
+- 入口：`Ctrl+N`、标题栏「新建窗口」按钮、空白处右键「新建窗口」、文件夹右键「在新窗口中打开」/`Ctrl+Shift+Enter`、调试命令 `new-window`。
+- 关闭：任意窗口关闭只移除该窗口；`main` 的 `on_window_closed` 在所有窗口都消失时退出进程。
+- 几何：最后一个窗口关闭时把 `WindowBounds` 写入 `window.json`（`%APPDATA%`，失败回退 `%LOCALAPPDATA%`/程序目录），启动时恢复尺寸与最大化状态；新窗口以 28px 步长层叠并夹取到显示器联合区域，防止恢复到已拔掉的显示器。
+- **不要在打开新窗口时读取当前窗口的根 View**：`AnyWindowHandle::update` 会再次 lease 同一个 `ExplorerApp`，而调用点本身正在 `update` 中，GPUI 会 panic（`already being updated`）。窗口几何因此改为来自持久化文件 + 进程内层叠计数。
+- **再次启动复用进程**：`single_instance.rs` 用 `\\.\pipe\YKExplorer-<user>-<session>` 命名管道。启动时先尝试作为客户端连接；连上就把启动路径（无参数时发送一个换行）写给已有进程并立即退出。第一个成功创建 `FIRST_PIPE_INSTANCE` 的进程成为主实例，后台线程一直接受请求并放入全局队列；每个窗口都有一个 120ms 轮询器取出请求并 `open_new_window`。这样点击图标、双击文件夹（含“替换资源管理器”场景）都会在现有进程里开新窗口，而不是产生第二个进程。管道不可用时退回独立进程；`--new-instance` 可跳过转发。
+
+### 3.8 空格快速预览
+
+- `Space` 针对 `preview_entry()`（优先选中项，否则光标项）打开覆盖层；再按 `Space`、`Esc`、点击遮罩关闭。
+- 覆盖层出现时先显示“正在读取”，由 background executor 读取内容并回填；256 KB / 600 行上限，避免大文件卡顿。
+- 文本解码支持 UTF-8（lossy）、UTF-16 LE/BE BOM；含 NUL 的未知格式按二进制处理。
+- 图片直接交给 GPUI `img`，失败时回退到类型色块；文件夹列出前 200 项。
+- 通过右键菜单「快速预览」也可进入；打开文件仍走 `ops::open_with_shell`。
+
+### 3.9 性能取舍
+
+- `FileEntry` 在加载时预计算 `size_label`、`modified_label`、`modified_relative`；列表/宫格渲染不再每帧调用 chrono 格式化。
+- 排序比较不再为每个条目 `to_lowercase()`，筛选使用一次构造的 `FilterMatcher`，普通子串匹配走无分配的忽略大小写扫描。
+- `TabState::selected` 为 `Arc<BTreeSet<PathBuf>>`，虚拟列表每帧只克隆一个 `Arc`；修改时 `Arc::make_mut` 写时复制。
+- 超过 512 项的目录用 `std::thread::scope` 并行读取元数据；小目录保持单线程，避免线程开销。
+- Shell 注册表动词/COM 扩展与磁盘列表按进程缓存；刷新按钮/设置页刷新会强制重新枚举。窗口越多，收益越明显。
+- 测试：`cargo test` 29 passed / 1 ignored；双窗口、空格预览、窗口恢复均通过 debug IPC + `PrintWindow` 截图验证。
+
 ## 4. 架构
 
 ```
@@ -138,6 +165,8 @@ src/
 ├─ main.rs           Application 初始化、快捷键、打开窗口
 ├─ app.rs            ExplorerApp：状态、动作、导航、拖放接线、全部 UI（标题栏/
 │                    面包屑/侧栏/详情/宫格/预览/弹窗/菜单/Toast）
+├─ window.rs         单进程多窗口、窗口几何持久化、窗口级钩子
+├─ single_instance.rs 命名管道单实例转发（再次启动交给已有进程）
 ├─ fs.rs             目录枚举、元数据、驱动器、用户目录、格式化、排序筛选
 ├─ ops.rs            复制/移动/回收站/重命名/新建/冲突改名/Shell 打开
 ├─ clipboard.rs      CF_HDROP 剪贴板读写 + preferred drop effect
@@ -149,7 +178,7 @@ src/
 └─ tools/            图标生成与离线 UI 自动化脚本（开发用）
 ```
 
-数据流：`ExplorerApp` 是唯一根 View；每个标签页保存路径、历史、条目、选中；所有文件任务走 GPUI background executor，完成后用 `WeakEntity` 回主线程更新，防止阻塞 UI。
+数据流：每个窗口一个 `ExplorerApp` 根 View；每个标签页保存路径、历史、条目、选中；所有文件任务走 GPUI background executor，完成后用 `WeakEntity` 回主线程更新，防止阻塞 UI。
 
 ## 5. API 调研结论（gpui 0.2.2 / Windows）
 

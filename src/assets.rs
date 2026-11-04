@@ -48,6 +48,7 @@ icons![
     ("icons/paste.svg", "paste.svg"),
     ("icons/pin.svg", "pin.svg"),
     ("icons/plus.svg", "plus.svg"),
+    ("icons/preview.svg", "preview.svg"),
     ("icons/print.svg", "print.svg"),
     ("icons/refresh.svg", "refresh.svg"),
     ("icons/restore.svg", "restore.svg"),
@@ -61,6 +62,7 @@ icons![
     ("icons/terminal.svg", "terminal.svg"),
     ("icons/trash.svg", "trash.svg"),
     ("icons/video.svg", "video.svg"),
+    ("icons/window.svg", "window.svg"),
 ];
 
 impl AssetSource for Assets {

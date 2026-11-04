@@ -67,6 +67,10 @@ actions!(
         RevealSelection,
         OpenSettings,
         Cancel,
+        NewWindow,
+        OpenInNewWindow,
+        ReopenClosedTab,
+        QuickLook,
     ]
 );
 
@@ -98,7 +102,10 @@ struct TabState {
     history_index: usize,
     entries: Arc<Vec<FileEntry>>,
     visible: Arc<Vec<usize>>,
-    selected: BTreeSet<PathBuf>,
+    /// Kept behind an `Arc` so the virtual list can snapshot the selection on
+    /// every frame without cloning thousands of paths. Mutations go through
+    /// `Arc::make_mut`, which is copy-on-write when a frame still holds it.
+    selected: Arc<BTreeSet<PathBuf>>,
     filter: String,
     cursor: usize,
     anchor: usize,
@@ -124,7 +131,7 @@ impl TabState {
             title,
             entries: Arc::new(Vec::new()),
             visible: Arc::new(Vec::new()),
-            selected: BTreeSet::new(),
+            selected: Arc::new(BTreeSet::new()),
             filter: String::new(),
             cursor: 0,
             anchor: 0,
@@ -164,11 +171,33 @@ impl TabState {
     }
 
     fn selected_size(&self) -> u64 {
-        self.selected_entries()
+        self.entries
             .iter()
-            .filter(|entry| !entry.is_dir)
+            .filter(|entry| !entry.is_dir && self.selected.contains(&entry.path))
             .map(|entry| entry.size)
             .sum()
+    }
+
+    fn clear_selection(&mut self) {
+        Arc::make_mut(&mut self.selected).clear();
+    }
+
+    fn insert_selection(&mut self, path: PathBuf) -> bool {
+        Arc::make_mut(&mut self.selected).insert(path)
+    }
+
+    fn remove_selection(&mut self, path: &Path) -> bool {
+        Arc::make_mut(&mut self.selected).remove(path)
+    }
+
+    fn replace_selection(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        let selection = Arc::make_mut(&mut self.selected);
+        selection.clear();
+        selection.extend(paths);
+    }
+
+    fn retain_selection(&mut self, keep: impl FnMut(&PathBuf) -> bool) {
+        Arc::make_mut(&mut self.selected).retain(keep);
     }
 
     fn entry_at_visible(&self, display_index: usize) -> Option<&FileEntry> {
@@ -216,6 +245,9 @@ enum Modal {
 enum MenuCommand {
     Open,
     OpenInNewTab,
+    OpenInNewWindow,
+    NewWindow,
+    QuickLook,
     Copy,
     Cut,
     Paste,
@@ -264,6 +296,32 @@ struct PendingDrag {
 struct DragRequest {
     paths: Vec<PathBuf>,
     shift: bool,
+}
+
+/// A tab that was closed, kept so `Ctrl+Shift+T` can bring it back.
+struct ClosedTab {
+    path: PathBuf,
+}
+
+/// Space-key / context-menu preview overlay. File contents are loaded on a
+/// background thread so large text files never stall the UI thread.
+struct QuickPreviewState {
+    entry: FileEntry,
+    payload: PreviewPayload,
+}
+
+enum PreviewPayload {
+    Loading,
+    Image,
+    Text {
+        lines: Vec<String>,
+        truncated: bool,
+    },
+    Folder {
+        entries: Vec<(String, bool)>,
+        truncated: bool,
+    },
+    Unsupported(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -438,6 +496,9 @@ pub struct ExplorerApp {
     pending_focus_list: bool,
     initial_focus_done: bool,
     window_handle: Option<windows::Win32::Foundation::HWND>,
+    window_title: String,
+    closed_tabs: Vec<ClosedTab>,
+    quick_preview: Option<QuickPreviewState>,
 }
 
 impl Focusable for ExplorerApp {
@@ -447,6 +508,31 @@ impl Focusable for ExplorerApp {
 }
 
 impl ExplorerApp {
+    /// Poll requests forwarded by a second process launch (icon click, folder
+    /// double-click). Every window polls the shared queue, so the listener
+    /// survives closing whichever window happened to be started first.
+    fn start_launch_listener(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(Duration::from_millis(120)).await;
+                while let Some(request) = crate::single_instance::take_launch_request() {
+                    let path = if request.is_empty() {
+                        None
+                    } else {
+                        Some(PathBuf::from(request))
+                    };
+                    if this
+                        .update(cx, |app, cx| app.open_new_window(path, cx))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
     #[cfg(debug_assertions)]
     pub(crate) fn start_debug_worker(
         &mut self,
@@ -510,6 +596,21 @@ impl ExplorerApp {
             "ping" => "pong".to_string(),
             "state" => serde_json::json!({
                 "path": self.active().path.display().to_string(),
+                "window_count": cx.windows().len(),
+                "quick_preview": self.quick_preview.as_ref().map(|preview| {
+                    let payload = match &preview.payload {
+                        PreviewPayload::Loading => "loading",
+                        PreviewPayload::Image => "image",
+                        PreviewPayload::Text { .. } => "text",
+                        PreviewPayload::Folder { .. } => "folder",
+                        PreviewPayload::Unsupported(_) => "unsupported",
+                    };
+                    serde_json::json!({
+                        "path": preview.entry.path.display().to_string(),
+                        "payload": payload,
+                    })
+                }),
+                "closed_tabs": self.closed_tabs.len(),
                 "title": self.active().title,
                 "view": match self.view_mode {
                     ViewMode::Details => "details",
@@ -1016,8 +1117,8 @@ impl ExplorerApp {
                     return format!("error not in current directory: {}", path.display());
                 };
                 let path = self.active().entries[index].path.clone();
-                self.active_mut().selected.clear();
-                self.active_mut().selected.insert(path.clone());
+                self.active_mut().clear_selection();
+                self.active_mut().insert_selection(path.clone());
                 self.active_mut().cursor = index;
                 self.active_mut().anchor = index;
                 cx.notify();
@@ -1066,6 +1167,26 @@ impl ExplorerApp {
                 cx.notify();
                 format!("ok context-menu {}", path.display())
             }
+            "new-window" => {
+                let path = if argument.is_empty() {
+                    self.active().path.clone()
+                } else {
+                    PathBuf::from(argument.trim().trim_matches('"'))
+                };
+                if !path.is_dir() {
+                    return format!("error not a directory: {}", path.display());
+                }
+                self.open_new_window(Some(path.clone()), cx);
+                format!(
+                    "ok new-window {} (total={})",
+                    path.display(),
+                    cx.windows().len()
+                )
+            }
+            "quick-look" => {
+                self.toggle_quick_look(cx);
+                format!("ok quick-look open={}", self.quick_preview.is_some())
+            }
             "cancel" => {
                 self.context_menu = None;
                 self.editor = None;
@@ -1078,10 +1199,26 @@ impl ExplorerApp {
         }
     }
 
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let start = fs::default_start_dir();
+    /// Create the root view for one window. `start` may be a folder or a file
+    /// (the file is selected in its parent folder). Each window owns its own
+    /// tabs/history; only preferences are read from disk.
+    pub fn new_at(cx: &mut Context<Self>, start: Option<PathBuf>) -> Self {
+        let (start, pending_select) = match start.filter(|path| path.exists()) {
+            Some(path) if path.is_file() => {
+                let parent = path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| path.clone());
+                (parent, Some(path))
+            }
+            Some(path) => (path, None),
+            None => (fs::default_start_dir(), None),
+        };
         let persisted = load_persisted_settings();
-        if persisted.replace_explorer {
+        // Only rewrite the Shell registration when it is not already active;
+        // otherwise every new window would overwrite the original backup with
+        // YKExplorer's own command.
+        if persisted.replace_explorer && !crate::explorer::is_enabled() {
             let _ = crate::explorer::enable();
         }
         let (mut font_family, mut fallback_fonts, font_options) = choose_fonts(cx);
@@ -1101,7 +1238,7 @@ impl ExplorerApp {
                 .as_ref()
                 .map(|paths| paths.iter().map(|path| fs::quick_place_for(path)).collect())
                 .unwrap_or_else(fs::quick_places),
-            drives: fs::drives(),
+            drives: fs::drives_cached(),
             view_mode: ViewMode::Split,
             sort_key: SortKey::Name,
             sort_asc: true,
@@ -1118,11 +1255,11 @@ impl ExplorerApp {
             toast_generation: 0,
             operation: None,
             pending_drag: None,
-            pending_select: None,
+            pending_select,
             shell_menu: persisted.shell_menu,
-            registry_items: shell_registry::enumerate(),
+            registry_items: shell_registry::enumerate_cached(),
             registry_menu: persisted.registry_menu,
-            shellex_items: shell_registry::enumerate_handlers(),
+            shellex_items: shell_registry::enumerate_handlers_cached(),
             shellex_menu: persisted.shellex_menu,
             shell_handler_menus: Vec::new(),
             context_submenu: None,
@@ -1149,8 +1286,12 @@ impl ExplorerApp {
             pending_focus_list: false,
             initial_focus_done: false,
             window_handle: None,
+            window_title: "YKExplorer".to_string(),
+            closed_tabs: Vec::new(),
+            quick_preview: None,
         };
         app.load_active(cx);
+        app.start_launch_listener(cx);
         app
     }
 
@@ -1246,7 +1387,7 @@ impl ExplorerApp {
                 this.tabs[index].search_truncated = truncated;
                 this.tabs[index].entries = Arc::new(results);
                 this.tabs[index].visible = Arc::new(Vec::new());
-                this.tabs[index].selected.clear();
+                this.tabs[index].clear_selection();
                 this.tabs[index].cursor = 0;
                 this.tabs[index].anchor = 0;
                 this.rebuild_tab_visible(index);
@@ -1319,7 +1460,7 @@ impl ExplorerApp {
                         this.rebuild_tab_visible(index);
                         let existing: BTreeSet<PathBuf> =
                             this.tabs[index].entries.iter().map(|e| e.path.clone()).collect();
-                        this.tabs[index].selected.retain(|path| existing.contains(path));
+                        this.tabs[index].retain_selection(|path| existing.contains(path));
                         this.tabs[index].cursor = this.tabs[index]
                             .cursor
                             .min(this.tabs[index].visible.len().saturating_sub(1));
@@ -1328,7 +1469,7 @@ impl ExplorerApp {
                         this.tabs[index].error = Some(error);
                         this.tabs[index].entries = Arc::new(Vec::new());
                         this.tabs[index].visible = Arc::new(Vec::new());
-                        this.tabs[index].selected.clear();
+                        this.tabs[index].clear_selection();
                         this.tabs[index].cursor = 0;
                     }
                 }
@@ -1339,8 +1480,8 @@ impl ExplorerApp {
                             .iter()
                             .position(|&i| this.tabs[index].entries[i].path == path)
                         {
-                            this.tabs[index].selected.clear();
-                            this.tabs[index].selected.insert(path);
+                            this.tabs[index].clear_selection();
+                            this.tabs[index].insert_selection(path);
                             this.tabs[index].cursor = visible_index;
                             this.tabs[index].anchor = visible_index;
                         }
@@ -1376,7 +1517,7 @@ impl ExplorerApp {
         tab.history_index = tab.history.len() - 1;
         tab.path = path;
         tab.title = fs::path_display_name(&tab.path);
-        tab.selected.clear();
+        tab.clear_selection();
         tab.cursor = 0;
         tab.anchor = 0;
         tab.filter.clear();
@@ -1401,7 +1542,7 @@ impl ExplorerApp {
         tab.history_index -= 1;
         tab.path = tab.history[tab.history_index].clone();
         tab.title = fs::path_display_name(&tab.path);
-        tab.selected.clear();
+        tab.clear_selection();
         tab.cursor = 0;
         tab.anchor = 0;
         tab.filter.clear();
@@ -1422,7 +1563,7 @@ impl ExplorerApp {
         tab.history_index += 1;
         tab.path = tab.history[tab.history_index].clone();
         tab.title = fs::path_display_name(&tab.path);
-        tab.selected.clear();
+        tab.clear_selection();
         tab.cursor = 0;
         tab.anchor = 0;
         tab.filter.clear();
@@ -1441,15 +1582,6 @@ impl ExplorerApp {
         };
         window.focus(&self.focus_handle);
         self.navigate_to(parent, cx);
-    }
-
-    pub fn open_start_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if path.is_dir() {
-            self.navigate_to(path, cx);
-        } else if let Some(parent) = path.parent().map(Path::to_path_buf) {
-            self.pending_select = Some(path);
-            self.navigate_to(parent, cx);
-        }
     }
 
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1492,6 +1624,14 @@ impl ExplorerApp {
         if index >= self.tabs.len() {
             return;
         }
+        // Remember the folder so Ctrl+Shift+T can restore it.
+        let closed = ClosedTab {
+            path: self.tabs[index].path.clone(),
+        };
+        self.closed_tabs.push(closed);
+        if self.closed_tabs.len() > 24 {
+            self.closed_tabs.remove(0);
+        }
         self.tabs.remove(index);
         if self.tabs.is_empty() {
             let path = dirs::home_dir()
@@ -1516,6 +1656,24 @@ impl ExplorerApp {
         cx.notify();
     }
 
+    fn reopen_closed_tab(&mut self, cx: &mut Context<Self>) {
+        let Some(closed) = self.closed_tabs.pop() else {
+            self.show_toast("没有可恢复的标签页", ToastKind::Info, cx);
+            return;
+        };
+        self.new_tab(Some(closed.path), cx);
+    }
+
+    /// Open another explorer window in this process. The new window is fully
+    /// independent (own tabs/history) and shares the configuration file.
+    fn open_new_window(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+        let path = path.unwrap_or_else(|| self.active().path.clone());
+        if crate::window::open(&mut **cx, crate::window::WindowSpec::at(path)).is_none() {
+            self.show_error("无法新建窗口", "系统没有创建新的窗口，请稍后重试。");
+            cx.notify();
+        }
+    }
+
     fn cycle_tab(&mut self, forward: bool, cx: &mut Context<Self>) {
         if self.tabs.len() <= 1 {
             return;
@@ -1535,6 +1693,48 @@ impl ExplorerApp {
     fn set_view(&mut self, view: ViewMode, cx: &mut Context<Self>) {
         self.view_mode = view;
         cx.notify();
+    }
+
+    /// Space toggles a lightweight preview overlay for the selected/cursor
+    /// entry. Contents are loaded in the background; the overlay appears
+    /// immediately with a loading state.
+    fn toggle_quick_look(&mut self, cx: &mut Context<Self>) {
+        if self.quick_preview.is_some() {
+            self.quick_preview = None;
+            cx.notify();
+            return;
+        }
+        let Some(entry) = self.active().preview_entry().cloned() else {
+            return;
+        };
+        self.context_menu = None;
+        self.editor = None;
+        self.modal = None;
+        self.quick_preview = Some(QuickPreviewState {
+            entry: entry.clone(),
+            payload: PreviewPayload::Loading,
+        });
+        cx.notify();
+
+        let path = entry.path.clone();
+        let load_path = path.clone();
+        let is_dir = entry.is_dir;
+        let extension = entry.extension.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { load_preview_payload(&load_path, is_dir, &extension) });
+        cx.spawn(async move |this, cx| {
+            let payload = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(state) = &mut this.quick_preview {
+                    if state.entry.path == path {
+                        state.payload = payload;
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     fn begin_edit(
@@ -1642,7 +1842,7 @@ impl ExplorerApp {
                 if matches!(target, EditTarget::Search) {
                     if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                         tab.filter = text.clone();
-                        tab.selected.clear();
+                        tab.clear_selection();
                     }
                     self.rebuild_visible();
                     log::debug!("search changed, visible={}", self.active().visible.len());
@@ -1695,6 +1895,21 @@ impl ExplorerApp {
             }
             EditTarget::Path => {
                 self.close_editor();
+                let command = text.trim().to_ascii_lowercase();
+                if matches!(command.as_str(), "cmd" | "powershell" | "pwsh" | "wt" | "terminal")
+                {
+                    let directory = self.active().path.clone();
+                    let result = match command.as_str() {
+                        "cmd" => ops::open_cmd(&directory),
+                        "wt" | "terminal" => ops::open_terminal(&directory),
+                        _ => ops::open_powershell(&directory),
+                    };
+                    if let Err(error) = result {
+                        self.show_error("无法打开终端", error);
+                        cx.notify();
+                    }
+                    return;
+                }
                 match fs::expand_user_path(&text) {
                     Ok(path) => {
                         if path.is_dir() {
@@ -1810,16 +2025,16 @@ impl ExplorerApp {
         if extend {
             let start = tab.anchor.min(index);
             let end = tab.anchor.max(index);
-            tab.selected.clear();
+            tab.clear_selection();
             for i in start..=end {
-                if let Some(entry) = tab.entry_at_visible(i) {
-                    tab.selected.insert(entry.path.clone());
+                if let Some(path) = tab.entry_at_visible(i).map(|entry| entry.path.clone()) {
+                    tab.insert_selection(path);
                 }
             }
             tab.cursor = index;
         } else {
-            tab.selected.clear();
-            tab.selected.insert(path);
+            tab.clear_selection();
+            tab.insert_selection(path);
             tab.cursor = index;
             tab.anchor = index;
         }
@@ -1835,7 +2050,7 @@ impl ExplorerApp {
         let mut changed = false;
         for i in start..=end {
             if let Some(path) = tab.entry_at_visible(i).map(|entry| entry.path.clone()) {
-                changed |= tab.selected.insert(path);
+                changed |= tab.insert_selection(path);
             }
         }
         tab.cursor = index;
@@ -1849,8 +2064,8 @@ impl ExplorerApp {
         let Some(path) = tab.entry_at_visible(index).map(|e| e.path.clone()) else {
             return;
         };
-        if !tab.selected.remove(&path) {
-            tab.selected.insert(path);
+        if !tab.remove_selection(&path) {
+            tab.insert_selection(path);
         }
         tab.cursor = index;
         tab.anchor = index;
@@ -1873,7 +2088,7 @@ impl ExplorerApp {
             // grow it as the pointer crosses rows. This makes it possible to
             // select 4-5, release, then Shift-drag 1-2 and end up with 1,2,4,5.
             let tab = self.active_mut();
-            tab.selected.insert(path.to_path_buf());
+            tab.insert_selection(path.to_path_buf());
             tab.cursor = visible_index;
             tab.anchor = visible_index;
             self.rubber_band = Some((event.position, event.position));
@@ -1881,8 +2096,8 @@ impl ExplorerApp {
         } else {
             let already_selected = self.active().selected.contains(path);
             if !already_selected {
-                self.active_mut().selected.clear();
-                self.active_mut().selected.insert(path.to_path_buf());
+                self.active_mut().clear_selection();
+                self.active_mut().insert_selection(path.to_path_buf());
                 self.active_mut().cursor = visible_index;
                 self.active_mut().anchor = visible_index;
                 cx.notify();
@@ -2005,8 +2220,8 @@ impl ExplorerApp {
     ) {
         if !self.active().selected.contains(path) {
             let tab = self.active_mut();
-            tab.selected.clear();
-            tab.selected.insert(path.to_path_buf());
+            tab.clear_selection();
+            tab.insert_selection(path.to_path_buf());
             tab.cursor = visible_index;
             tab.anchor = visible_index;
         }
@@ -2116,11 +2331,12 @@ impl ExplorerApp {
 
     fn select_all_visible(&mut self, cx: &mut Context<Self>) {
         let tab = self.active_mut();
-        tab.selected = tab
+        let paths: Vec<PathBuf> = tab
             .visible
             .iter()
             .map(|&i| tab.entries[i].path.clone())
             .collect();
+        tab.replace_selection(paths);
         if !tab.visible.is_empty() {
             tab.anchor = 0;
             tab.cursor = 0;
@@ -2625,6 +2841,14 @@ impl ExplorerApp {
                     self.new_tab(Some(entry.path), cx);
                 }
             }
+            MenuCommand::OpenInNewWindow => {
+                let target = menu_target
+                    .clone()
+                    .or_else(|| self.selected_paths().into_iter().next());
+                self.open_new_window(target, cx);
+            }
+            MenuCommand::NewWindow => self.open_new_window(None, cx),
+            MenuCommand::QuickLook => self.toggle_quick_look(cx),
             MenuCommand::Copy => self.copy_selection(false, cx),
             MenuCommand::Cut => self.copy_selection(true, cx),
             MenuCommand::Paste => self.paste_selection(cx),
@@ -2807,6 +3031,11 @@ impl ExplorerApp {
     }
 
     fn cancel_or_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quick_preview.take().is_some() {
+            window.focus(&self.focus_handle);
+            cx.notify();
+            return;
+        }
         if let Some(session) = &self.editor {
             if matches!(session.target, EditTarget::Search) {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
@@ -2832,7 +3061,7 @@ impl ExplorerApp {
             self.clear_search(cx);
             return;
         }
-        self.active_mut().selected.clear();
+        self.active_mut().clear_selection();
         cx.notify();
     }
 
@@ -3191,10 +3420,10 @@ impl ExplorerApp {
     }
 
     fn refresh_registry_menu(&mut self, cx: &mut Context<Self>) {
-        self.registry_items = shell_registry::enumerate();
+        self.registry_items = shell_registry::enumerate_refresh();
         self.registry_menu
             .retain(|id, _| self.registry_items.iter().any(|item| &item.id == id));
-        self.shellex_items = shell_registry::enumerate_handlers();
+        self.shellex_items = shell_registry::enumerate_handlers_refresh();
         self.shellex_menu
             .retain(|id, _| self.shellex_items.iter().any(|item| &item.id == id));
         self.save_settings();
@@ -3279,6 +3508,51 @@ impl ExplorerApp {
         self.new_tab_from_current(cx);
     }
 
+    fn action_new_window(&mut self, _: &NewWindow, _: &mut Window, cx: &mut Context<Self>) {
+        if self.modal.is_some() {
+            return;
+        }
+        self.open_new_window(None, cx);
+    }
+
+    fn action_open_in_new_window(
+        &mut self,
+        _: &OpenInNewWindow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.modal.is_some() {
+            return;
+        }
+        window.focus(&self.focus_handle);
+        let target = self
+            .active()
+            .preview_entry()
+            .map(|entry| entry.path.clone())
+            .unwrap_or_else(|| self.active().path.clone());
+        self.open_new_window(Some(target), cx);
+    }
+
+    fn action_reopen_closed_tab(
+        &mut self,
+        _: &ReopenClosedTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.modal.is_some() {
+            return;
+        }
+        window.focus(&self.focus_handle);
+        self.reopen_closed_tab(cx);
+    }
+
+    fn action_quick_look(&mut self, _: &QuickLook, _: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.is_some() || self.modal.is_some() {
+            return;
+        }
+        self.toggle_quick_look(cx);
+    }
+
     fn action_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.modal.is_some() {
             return;
@@ -3302,6 +3576,9 @@ impl ExplorerApp {
     }
 
     fn action_open(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quick_preview.take().is_some() {
+            cx.notify();
+        }
         self.open_selected(false, window, cx);
     }
 
@@ -3311,6 +3588,9 @@ impl ExplorerApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.quick_preview.take().is_some() {
+            cx.notify();
+        }
         self.open_selected(true, window, cx);
     }
 
@@ -3645,7 +3925,7 @@ impl ExplorerApp {
             .map(|(index, tab)| (index, tab.title.clone()))
             .collect();
         let viewport_width = f32::from(window.viewport_size().width);
-        let tab_strip_width = (tabs_data.len() as f32 * 180.0 + 26.0)
+        let tab_strip_width = (tabs_data.len() as f32 * 180.0 + 64.0)
             .min((viewport_width - 330.0).max(180.0));
 
         let tabs = tabs_data.into_iter().map(|(index, title)| {
@@ -3792,6 +4072,32 @@ impl ExplorerApp {
                             .child(
                                 svg()
                                     .path("icons/plus.svg")
+                                    .size(px(14.))
+                                    .text_color(theme::text_faint()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("new-window")
+                            .flex_none()
+                            .size(px(26.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_color(theme::text_faint())
+                            .hover(|this| {
+                                this.bg(theme::hover())
+                                    .text_color(theme::text())
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                window.focus(&this.focus_handle);
+                                this.open_new_window(Some(this.active().path.clone()), cx);
+                            }))
+                            .child(
+                                svg()
+                                    .path("icons/window.svg")
                                     .size(px(14.))
                                     .text_color(theme::text_faint()),
                             ),
@@ -4670,7 +4976,11 @@ impl ExplorerApp {
         let tab = self.active();
         let selected = tab.selected.len();
         let total = tab.visible.len();
-        let selected_size = tab.selected_size();
+        let selected_size = if selected > 0 {
+            tab.selected_size()
+        } else {
+            0
+        };
         let left = if selected > 0 {
             format!(
                 "已选 {} 项 · {}",
@@ -4725,7 +5035,7 @@ impl ExplorerApp {
             .child(
                 div()
                     .text_color(theme::text_faint())
-                    .child("拖动：移动 · 按住 Ctrl：复制 · Shift+拖动：累加框选"),
+                    .child("空格：预览 · 拖动：移动 · Ctrl：复制 · Shift+拖动：累加框选"),
             )
             .child(
                 div()
@@ -4759,6 +5069,11 @@ impl Render for ExplorerApp {
                         Some(windows::Win32::Foundation::HWND(raw.hwnd.get() as *mut _));
                 }
             }
+        }
+        let window_title = format!("{} - YKExplorer", self.active().path.display());
+        if self.window_title != window_title {
+            window.set_window_title(&window_title);
+            self.window_title = window_title;
         }
         if self.activation_subscription.is_none() {
             // Focus listeners only run while a frame is drawn. A minimized or
@@ -4925,6 +5240,10 @@ impl Render for ExplorerApp {
             .on_action(cx.listener(Self::action_focus_search))
             .on_action(cx.listener(Self::action_new_tab))
             .on_action(cx.listener(Self::action_close_tab))
+            .on_action(cx.listener(Self::action_new_window))
+            .on_action(cx.listener(Self::action_open_in_new_window))
+            .on_action(cx.listener(Self::action_reopen_closed_tab))
+            .on_action(cx.listener(Self::action_quick_look))
             .on_action(cx.listener(Self::action_next_tab))
             .on_action(cx.listener(Self::action_prev_tab))
             .on_action(cx.listener(Self::action_open))
@@ -5268,7 +5587,7 @@ impl ExplorerApp {
         let tab = self.active();
         let entries = tab.entries.clone();
         let visible = tab.visible.clone();
-        let selected = Arc::new(tab.selected.clone());
+        let selected = tab.selected.clone();
         let scroll = tab.details_scroll.clone();
         let weak = cx.entity().downgrade();
         let focus = self.focus_handle.clone();
@@ -5324,7 +5643,7 @@ impl ExplorerApp {
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 window.focus(&this.focus_handle);
-                this.active_mut().selected.clear();
+                this.active_mut().clear_selection();
                 this.context_menu = None;
                 this.rubber_band = Some((event.position, event.position));
                 this.rubber_band_additive = false;
@@ -5359,7 +5678,7 @@ impl ExplorerApp {
         let tab = self.active();
         let entries = tab.entries.clone();
         let visible = tab.visible.clone();
-        let selected = Arc::new(tab.selected.clone());
+        let selected = tab.selected.clone();
         let scroll = tab.grid_scroll.clone();
         let search_root = tab.search_root.clone();
         let hovered_row = self.hovered_row;
@@ -5437,7 +5756,7 @@ impl ExplorerApp {
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 window.focus(&this.focus_handle);
-                this.active_mut().selected.clear();
+                this.active_mut().clear_selection();
                 this.context_menu = None;
                 this.rubber_band = Some((event.position, event.position));
                 this.rubber_band_additive = false;
@@ -5474,12 +5793,26 @@ impl ExplorerApp {
         let selected_count = tab.selected.len();
         let preview = tab.preview_entry().cloned();
         let preview_name = preview.as_ref().map(|entry| entry.name.clone());
-        let selected_entries = tab.selected_entries();
-        let total_selected_size = tab.selected_size();
+        // Only clone the handful of entries shown in the multi-selection
+        // summary; the old code cloned every selected FileEntry each frame.
+        let selected_preview: Vec<&FileEntry> = if selected_count > 1 {
+            tab.entries
+                .iter()
+                .filter(|entry| tab.selected.contains(&entry.path))
+                .take(9)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let total_selected_size = if selected_count > 1 {
+            tab.selected_size()
+        } else {
+            0
+        };
 
         let body: AnyElement = if selected_count > 1 {
             let mut names: Vec<AnyElement> = Vec::new();
-            for entry in selected_entries.iter().take(9) {
+            for entry in &selected_preview {
                 names.push(
                     div()
                         .flex()
@@ -5495,11 +5828,11 @@ impl ExplorerApp {
                         .into_any_element(),
                 );
             }
-            if selected_entries.len() > 9 {
+            if selected_count > 9 {
                 names.push(
                     div()
                         .text_color(theme::text_faint())
-                        .child(format!("…以及另外 {} 项", selected_entries.len() - 9))
+                        .child(format!("…以及另外 {} 项", selected_count - 9))
                         .into_any_element(),
                 );
             }
@@ -5935,6 +6268,143 @@ fn slide_block(
 }
 
 /// Folder shown in the "type" column while search results are displayed.
+const PREVIEW_TEXT_LIMIT: usize = 256 * 1024;
+const PREVIEW_LINE_LIMIT: usize = 600;
+const PREVIEW_FOLDER_LIMIT: usize = 200;
+
+fn is_image_extension(extension: &str) -> bool {
+    matches!(
+        extension,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg" | "avif" | "tif" | "tiff"
+    )
+}
+
+fn is_text_extension(extension: &str) -> bool {
+    matches!(
+        extension,
+        "txt" | "text" | "md" | "markdown" | "json" | "jsonc" | "toml" | "yaml" | "yml" | "xml"
+            | "csv" | "tsv" | "log" | "ini" | "cfg" | "conf" | "env" | "gitignore" | "rs" | "c"
+            | "h" | "hpp" | "cpp" | "cc" | "cs" | "js" | "jsx" | "mjs" | "ts" | "tsx" | "vue"
+            | "svelte" | "py" | "rb" | "go" | "java" | "kt" | "kts" | "swift" | "php" | "lua"
+            | "html" | "htm" | "css" | "scss" | "less" | "sql" | "sh" | "bash" | "zsh" | "ps1"
+            | "bat" | "cmd" | "dockerfile" | "makefile" | "cmake" | "gradle" | "lock" | "diff"
+            | "patch" | "svg" | "srt" | "vtt"
+    )
+}
+
+fn decode_preview_text(bytes: &[u8]) -> Option<String> {
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        return Some(String::from_utf16_lossy(&units));
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        return Some(String::from_utf16_lossy(&units));
+    }
+    if bytes.contains(&0) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Build the preview payload for the quick-look overlay. Runs on the
+/// background executor, never on the UI thread.
+fn load_preview_payload(path: &Path, is_dir: bool, extension: &str) -> PreviewPayload {
+    use std::io::Read;
+
+    if is_dir {
+        let mut entries = Vec::new();
+        let mut truncated = false;
+        if let Ok(read) = std::fs::read_dir(path) {
+            for item in read.flatten() {
+                if entries.len() >= PREVIEW_FOLDER_LIMIT {
+                    truncated = true;
+                    break;
+                }
+                let name = item.file_name().to_string_lossy().into_owned();
+                let is_dir = item
+                    .file_type()
+                    .map(|file_type| file_type.is_dir())
+                    .unwrap_or(false);
+                entries.push((name, is_dir));
+            }
+        }
+        entries.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+        });
+        return PreviewPayload::Folder { entries, truncated };
+    }
+
+    if is_image_extension(extension) {
+        return PreviewPayload::Image;
+    }
+
+    let known_text = is_text_extension(extension);
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) => return PreviewPayload::Unsupported(format!("无法读取文件：{error}")),
+    };
+    let mut bytes = Vec::with_capacity(8 * 1024);
+    if let Err(error) = file
+        .by_ref()
+        .take(PREVIEW_TEXT_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+    {
+        return PreviewPayload::Unsupported(format!("无法读取文件：{error}"));
+    }
+    let truncated = bytes.len() > PREVIEW_TEXT_LIMIT;
+    bytes.truncate(PREVIEW_TEXT_LIMIT);
+
+    let Some(text) = decode_preview_text(&bytes) else {
+        return PreviewPayload::Unsupported(
+            "二进制文件，按 Enter 用默认程序打开".to_string(),
+        );
+    };
+    // Unknown extensions are previewed only when the sniffed bytes look like
+    // text; this keeps executables and archives from showing garbage.
+    if !known_text && bytes.len() > 0 && !looks_like_text(&bytes) {
+        return PreviewPayload::Unsupported(
+            "二进制文件，按 Enter 用默认程序打开".to_string(),
+        );
+    }
+    let mut lines: Vec<String> = text
+        .lines()
+        .take(PREVIEW_LINE_LIMIT)
+        .map(str::to_owned)
+        .collect();
+    let text_truncated = truncated || text.lines().count() > PREVIEW_LINE_LIMIT;
+    if text_truncated && lines.len() == PREVIEW_LINE_LIMIT {
+        lines.push("…（预览已截断）".to_string());
+    }
+    PreviewPayload::Text {
+        lines,
+        truncated: text_truncated,
+    }
+}
+
+fn looks_like_text(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(4096)];
+    let printable = sample
+        .iter()
+        .filter(|byte| {
+            let byte = **byte;
+            byte == b'\n'
+                || byte == b'\r'
+                || byte == b'\t'
+                || (0x20..0x7f).contains(&byte)
+                || byte >= 0x80
+        })
+        .count();
+    printable * 100 / sample.len().max(1) >= 90
+}
+
 fn search_location(root: &Path, path: &Path) -> String {
     let Some(parent) = path.parent() else {
         return String::new();
@@ -5971,12 +6441,8 @@ fn details_row(
     let click_entry = entry.clone();
     let row_hidden = entry.is_hidden;
     let row_selected = selected;
-    let size = if entry.is_dir {
-        "—".to_string()
-    } else {
-        fs::format_size(entry.size)
-    };
-    let modified = fs::format_datetime(entry.modified);
+    let size = entry.size_label.clone();
+    let modified = entry.modified_label.clone();
     let highlight = slide_block(
         hover,
         selected.then(|| theme::accent_soft()),
@@ -6034,7 +6500,7 @@ fn details_row(
                     if app.rubber_band.is_some() && crate::drag_out::left_button_down() {
                         if app.rubber_band_additive {
                             app.extend_rubber_selection(display_index, cx);
-                        } else if app.active_mut().selected.insert(path) {
+                        } else if app.active_mut().insert_selection(path) {
                             cx.notify();
                         }
                     }
@@ -6182,7 +6648,7 @@ fn grid_card(
         type_tile(icon, color, &extension, 120.0).into_any_element()
     };
 
-    let date = fs::format_relative(entry.modified);
+    let date = entry.modified_relative.clone();
     let highlight = slide_block(
         if selected { None } else { hover },
         None,
@@ -6259,7 +6725,7 @@ fn grid_card(
                     if app.rubber_band.is_some() && crate::drag_out::left_button_down() {
                         if app.rubber_band_additive {
                             app.extend_rubber_selection(display_index, cx);
-                        } else if app.active_mut().selected.insert(path) {
+                        } else if app.active_mut().insert_selection(path) {
                             cx.notify();
                         }
                     }
@@ -6326,6 +6792,311 @@ fn grid_card(
 }
 
 impl ExplorerApp {
+    /// Full-window quick-look overlay (Space). Keeps the list visible behind a
+    /// dimmed backdrop and closes with Space / Esc / a click outside.
+    fn render_quick_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(state) = &self.quick_preview else {
+            return div().into_any_element();
+        };
+        let entry = state.entry.clone();
+        let payload = &state.payload;
+        let viewport = window.viewport_size();
+        let width = (f32::from(viewport.width) - 160.0).clamp(420.0, 1120.0);
+        let height = (f32::from(viewport.height) - 160.0).clamp(320.0, 780.0);
+
+        let body: AnyElement = match payload {
+            PreviewPayload::Loading => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .text_size(px(11.5))
+                .text_color(theme::text_faint())
+                .child(svg().path("icons/info.svg").size(px(18.)))
+                .child("正在读取预览…")
+                .into_any_element(),
+            PreviewPayload::Image => {
+                let icon = entry.kind.icon();
+                let color = kind_color(entry.kind);
+                let label = entry.extension.to_ascii_uppercase();
+                img(entry.path.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .with_fallback(move || type_tile(icon, color, &label, 180.0).into_any_element())
+                    .into_any_element()
+            }
+            PreviewPayload::Text { lines, truncated } => {
+                let rows: Vec<AnyElement> = lines
+                    .iter()
+                    .map(|line| {
+                        div()
+                            .min_h(px(16.))
+                            .font_family("Consolas")
+                            .text_size(px(11.5))
+                            .text_color(theme::text())
+                            .child(if line.is_empty() {
+                                " ".to_string()
+                            } else {
+                                line.clone()
+                            })
+                            .into_any_element()
+                    })
+                    .collect();
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(0.5))
+                    .children(rows)
+                    .when(*truncated, |this| {
+                        this.child(
+                            div()
+                                .mt_2()
+                                .text_size(px(10.))
+                                .text_color(theme::text_faint())
+                                .child("文件较大，仅显示开头部分"),
+                        )
+                    })
+                    .into_any_element()
+            }
+            PreviewPayload::Folder { entries, truncated } => {
+                let rows: Vec<AnyElement> = entries
+                    .iter()
+                    .map(|(name, is_dir)| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .h(px(24.))
+                            .text_size(px(11.5))
+                            .text_color(if *is_dir {
+                                theme::text()
+                            } else {
+                                theme::text_muted()
+                            })
+                            .child(
+                                svg()
+                                    .path(if *is_dir {
+                                        "icons/folder.svg"
+                                    } else {
+                                        "icons/file.svg"
+                                    })
+                                    .size(px(13.))
+                                    .text_color(if *is_dir {
+                                        theme::folder()
+                                    } else {
+                                        theme::text_faint()
+                                    }),
+                            )
+                            .child(div().truncate().child(name.clone()))
+                            .into_any_element()
+                    })
+                    .collect();
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .children(rows)
+                    .when(*truncated, |this| {
+                        this.child(
+                            div()
+                                .mt_1()
+                                .text_size(px(10.))
+                                .text_color(theme::text_faint())
+                                .child("…仅列出前 200 项"),
+                        )
+                    })
+                    .into_any_element()
+            }
+            PreviewPayload::Unsupported(message) => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .text_color(theme::text_muted())
+                .child(
+                    svg()
+                        .path(entry.kind.icon())
+                        .size(px(46.))
+                        .text_color(kind_color(entry.kind)),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .child(message.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme::text_faint())
+                        .child("按 Enter 用默认程序打开"),
+                )
+                .into_any_element(),
+        };
+
+        let open_path = entry.path.clone();
+        let close = cx.listener(|this, _, _, cx| {
+            this.quick_preview = None;
+            cx.notify();
+        });
+        let open = cx.listener(move |this, _, window, cx| {
+            this.quick_preview = None;
+            window.focus(&this.focus_handle);
+            if open_path.is_dir() {
+                this.navigate_to(open_path.clone(), cx);
+            } else if let Err(error) = ops::open_with_shell(&open_path) {
+                this.show_error("无法打开", error);
+                cx.notify();
+            }
+        });
+
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme::black().opacity(0.42))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.quick_preview = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("quick-preview")
+                    .w(px(width))
+                    .h(px(height))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p(px(16.))
+                    .rounded_lg()
+                    .bg(theme::surface())
+                    .border_1()
+                    .border_color(theme::border())
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                svg()
+                                    .path(entry.kind.icon())
+                                    .size(px(20.))
+                                    .text_color(kind_color(entry.kind)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(1.))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(13.))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(entry.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(10.))
+                                            .text_color(theme::text_faint())
+                                            .child(entry.path.to_string_lossy().into_owned()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(theme::text_faint())
+                                    .child(entry.type_label.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id("quick-preview-open")
+                                    .h(px(26.))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_md()
+                                    .bg(theme::accent())
+                                    .text_color(theme::white())
+                                    .text_size(px(11.))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(theme::accent_hover()))
+                                    .on_click(open)
+                                    .child("打开"),
+                            )
+                            .child(
+                                div()
+                                    .id("quick-preview-close")
+                                    .size(px(26.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_color(theme::text_muted())
+                                    .hover(|this| {
+                                        this.bg(theme::hover()).text_color(theme::text())
+                                    })
+                                    .on_click(close)
+                                    .child(
+                                        svg()
+                                            .path("icons/close.svg")
+                                            .size(px(13.))
+                                            .text_color(theme::text_muted()),
+                                    ),
+                            ),
+                    )
+                    .child(div().h(px(1.)).bg(theme::border_soft()))
+                    .child(
+                        div()
+                            .id("quick-preview-body")
+                            .flex_1()
+                            .min_h(px(0.))
+                            .overflow_y_scroll()
+                            .child(body),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_size(px(10.))
+                            .text_color(theme::text_faint())
+                            .child("空格 / Esc 关闭")
+                            .child(if entry.is_dir {
+                                match payload {
+                                    PreviewPayload::Folder { entries, .. } => {
+                                        format!("文件夹 · {} 项", entries.len())
+                                    }
+                                    _ => "文件夹".to_string(),
+                                }
+                            } else {
+                                format!(
+                                    "{} · {}",
+                                    entry.type_label,
+                                    fs::format_size(entry.size)
+                                )
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut overlays = Vec::new();
         if self.context_menu.is_some() {
@@ -6431,6 +7202,9 @@ impl ExplorerApp {
                     )
                     .into_any_element(),
             );
+        }
+        if self.quick_preview.is_some() {
+            overlays.push(self.render_quick_preview(window, cx));
         }
         overlays
     }
@@ -7679,7 +8453,23 @@ impl ExplorerApp {
                     false,
                     cx,
                 ));
+                items.push(self.menu_item(
+                    MenuCommand::OpenInNewWindow,
+                    "icons/window.svg",
+                    "在新窗口中打开",
+                    "Ctrl+Shift+Enter",
+                    false,
+                    cx,
+                ));
             }
+            items.push(self.menu_item(
+                MenuCommand::QuickLook,
+                "icons/preview.svg",
+                "快速预览",
+                "Space",
+                false,
+                cx,
+            ));
             items.push(menu_separator());
             items.push(self.menu_item(
                 MenuCommand::Copy,
@@ -7810,6 +8600,14 @@ impl ExplorerApp {
                 "icons/refresh.svg",
                 "刷新",
                 "F5",
+                false,
+                cx,
+            ));
+            items.push(self.menu_item(
+                MenuCommand::NewWindow,
+                "icons/window.svg",
+                "新建窗口",
+                "Ctrl+N",
                 false,
                 cx,
             ));

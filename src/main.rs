@@ -14,20 +14,21 @@ mod explorer;
 mod fs;
 mod ops;
 mod shell_registry;
+mod single_instance;
 mod text_input;
 mod theme;
+mod window;
 
-use gpui::{
-    App, Application, Bounds, KeyBinding, WindowBounds, WindowOptions, prelude::*, px, size,
-};
+use gpui::{App, Application, KeyBinding};
 
 use app::{
     Back, Cancel, CloseTab, CopyFiles, CopyPath, CutFiles, FILE_MANAGER_CONTEXT, FocusPath,
-    FocusSearch, Forward, NewFile, NewFolder, NewTab, NextTab, OpenSelected, OpenSelectedNewTab,
-    PasteFiles, PermanentDelete, ExplorerApp, PrevTab, Refresh, RenameSelection, RevealSelection,
-    SelectAll, SelectExtendFirst, SelectExtendLast, SelectExtendNext, SelectExtendPrev,
-    SelectFirst, SelectLast, SelectNext, SelectPrev, ToggleHidden, ToggleSidebar, TrashSelection,
-    Undo, Up, ViewDetails, ViewGrid, ViewSplit,
+    FocusSearch, Forward, NewFile, NewFolder, NewTab, NewWindow, NextTab, OpenInNewWindow,
+    OpenSelected, OpenSelectedNewTab, PasteFiles, PermanentDelete, PrevTab, QuickLook, Refresh,
+    RenameSelection, ReopenClosedTab, RevealSelection, SelectAll, SelectExtendFirst,
+    SelectExtendLast, SelectExtendNext, SelectExtendPrev, SelectFirst, SelectLast, SelectNext,
+    SelectPrev, ToggleHidden, ToggleSidebar, TrashSelection, Undo, Up, ViewDetails, ViewGrid,
+    ViewSplit,
 };
 use text_input::{
     EditorBackspace, EditorCancel, EditorCopy, EditorCut, EditorDelete, EditorEnd, EditorHome,
@@ -160,6 +161,20 @@ fn install_crash_logger() {
 fn main() {
     env_logger::init();
     install_crash_logger();
+
+    // Clicking the icon while YKExplorer is already running should hand the
+    // launch to that process and open a window there, not spawn a second copy.
+    let launch_path = explorer::launch_path();
+    let force_new_instance = std::env::args().any(|argument| argument == "--new-instance");
+    if !force_new_instance
+        && matches!(
+            single_instance::start(launch_path.clone()),
+            single_instance::Startup::Forwarded
+        )
+    {
+        return;
+    }
+
     Application::new()
         .with_assets(assets::Assets)
         .run(|cx: &mut App| {
@@ -172,43 +187,16 @@ fn main() {
             })
             .detach();
 
-            let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: None,
-                window_decorations: Some(gpui::WindowDecorations::Client),
-                window_min_size: Some(size(px(1120.), px(680.))),
-                focus: true,
-                show: true,
-                is_resizable: true,
-                is_movable: true,
-                ..Default::default()
-            };
-
-            cx.open_window(options, |window, cx| {
-                window.set_window_title("YKExplorer");
-                {
-                    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-                    if let Ok(handle) = <gpui::Window as HasWindowHandle>::window_handle(window) {
-                        if let RawWindowHandle::Win32(raw) = handle.as_raw() {
-                            drag_host::install(windows::Win32::Foundation::HWND(
-                                raw.hwnd.get() as *mut _,
-                            ));
-                        }
-                    }
-                }
-                let app = cx.new(|cx| ExplorerApp::new(cx));
-                if let Some(path) = explorer::launch_path() {
-                    app.update(cx, |app, cx| app.open_start_path(path, cx));
-                }
+            let spec = window::WindowSpec {
+                path: launch_path,
                 #[cfg(debug_assertions)]
-                if let Some(port) = debug_port() {
-                    let requests = debug_ipc::start(port);
-                    app.update(cx, |app, cx| app.start_debug_worker(requests, cx));
-                }
-                app
-            })
-            .ok();
+                debug_port: debug_port(),
+                #[cfg(not(debug_assertions))]
+                debug_port: None,
+                bounds: None,
+                restore_maximized: true,
+            };
+            let _ = window::open(cx, spec);
             cx.activate(true);
         });
 }
@@ -239,10 +227,18 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-f", FocusSearch, Some(FILE_MANAGER_CONTEXT)),
         KeyBinding::new("ctrl-t", NewTab, Some(FILE_MANAGER_CONTEXT)),
         KeyBinding::new("ctrl-w", CloseTab, Some(FILE_MANAGER_CONTEXT)),
+        KeyBinding::new("ctrl-n", NewWindow, Some(FILE_MANAGER_CONTEXT)),
+        KeyBinding::new("ctrl-shift-t", ReopenClosedTab, Some(FILE_MANAGER_CONTEXT)),
+        KeyBinding::new("space", QuickLook, Some(FILE_MANAGER_CONTEXT)),
         KeyBinding::new("ctrl-tab", NextTab, Some(FILE_MANAGER_CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PrevTab, Some(FILE_MANAGER_CONTEXT)),
         KeyBinding::new("enter", OpenSelected, Some(FILE_MANAGER_CONTEXT)),
         KeyBinding::new("ctrl-enter", OpenSelectedNewTab, Some(FILE_MANAGER_CONTEXT)),
+        KeyBinding::new(
+            "ctrl-shift-enter",
+            OpenInNewWindow,
+            Some(FILE_MANAGER_CONTEXT),
+        ),
         KeyBinding::new("ctrl-c", CopyFiles, Some(FILE_MANAGER_CONTEXT)),
         KeyBinding::new("ctrl-x", CutFiles, Some(FILE_MANAGER_CONTEXT)),
         KeyBinding::new("ctrl-v", PasteFiles, Some(FILE_MANAGER_CONTEXT)),

@@ -38,7 +38,9 @@ Invoke-YKExplorerDebug 'ping'
 | 命令 | 说明 |
 |---|---|
 | `ping` | 返回 `pong` |
-| `state` | 返回当前路径、视图、选中项、标签页、设置页、右键菜单状态、Shell 菜单开关、注册表菜单数量/启用数等 JSON |
+| `state` | 返回当前路径、窗口数、空格预览状态、视图、选中项、标签页、设置页、右键菜单状态、Shell 菜单开关、注册表菜单数量/启用数等 JSON |
+| `new-window [path]` | 在**同一个进程**中打开新窗口，返回当前窗口总数；不抢前台焦点 |
+| `quick-look` | 为当前选中项/光标项打开或关闭空格快速预览 |
 | `navigate <path>` | 导航到目录（不抢前台焦点） |
 | `view details\|grid\|split` | 切换视图 |
 | `hidden on\|off\|toggle` | 切换隐藏文件 |
@@ -90,6 +92,8 @@ Save-WindowPng -Handle $p.MainWindowHandle -Path 'D:\temp\ykexplorer.png'
 ```
 
 `Save-WindowPng` 使用 `PrintWindow(..., PW_RENDERFULLCONTENT)`，不会移动光标。
+
+多窗口模式下同一进程有多个顶层 HWND；`MainWindowHandle` 只返回其中一个。需要逐个截图时，用 `EnumWindows` + `GetWindowThreadProcessId` 枚举该进程的全部可见窗口，再对每个句柄调用 `Save-WindowPng`（可参考本轮 `docs/VERIFICATION.md` 的双窗口验证）。
 
 ## 安全说明
 

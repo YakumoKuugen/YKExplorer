@@ -81,6 +81,39 @@ pub fn enumerate() -> Vec<RegistryMenuItem> {
     items
 }
 
+fn registry_cache() -> &'static std::sync::RwLock<Option<Vec<RegistryMenuItem>>> {
+    static CACHE: std::sync::OnceLock<std::sync::RwLock<Option<Vec<RegistryMenuItem>>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+/// Cached variant used when a window opens. Registry enumeration (plus icon
+/// and version lookups) is slow enough to be noticeable when opening several
+/// windows, but the verb list changes rarely.
+pub fn enumerate_cached() -> Vec<RegistryMenuItem> {
+    if let Some(items) = registry_cache()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+    {
+        return items.clone();
+    }
+    let items = enumerate();
+    *registry_cache()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(items.clone());
+    items
+}
+
+/// Force a fresh enumeration and update the shared cache.
+pub fn enumerate_refresh() -> Vec<RegistryMenuItem> {
+    let items = enumerate();
+    *registry_cache()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(items.clone());
+    items
+}
+
 /// Invoke a registered verb on `path` (a file, folder, or the current folder
 /// for background verbs).
 pub fn invoke(item: &RegistryMenuItem, path: &Path) -> Result<(), String> {
@@ -378,6 +411,35 @@ pub fn enumerate_handlers() -> Vec<ShellHandler> {
     }
     let mut items: Vec<ShellHandler> = map.into_values().collect();
     items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    items
+}
+
+fn handler_cache() -> &'static std::sync::RwLock<Option<Vec<ShellHandler>>> {
+    static CACHE: std::sync::OnceLock<std::sync::RwLock<Option<Vec<ShellHandler>>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+pub fn enumerate_handlers_cached() -> Vec<ShellHandler> {
+    if let Some(items) = handler_cache()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+    {
+        return items.clone();
+    }
+    let items = enumerate_handlers();
+    *handler_cache()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(items.clone());
+    items
+}
+
+pub fn enumerate_handlers_refresh() -> Vec<ShellHandler> {
+    let items = enumerate_handlers();
+    *handler_cache()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(items.clone());
     items
 }
 
